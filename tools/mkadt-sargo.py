@@ -190,7 +190,12 @@ def build(seed=None, qemu=False, highmem=False):
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
-            ('compatible', cstr('sargo,display')),
+            # 'sweet,display' for now: the unmodified sweet kernel's FB
+            # driver (patch 0046) and HID services (patch 0058) match
+            # IONameMatch 'sweet,display' only. Switch to 'sargo,display'
+            # only when a sargo FB driver patch exists; never rename one
+            # side only. The FB geometry itself is sargo (fbcon node).
+            ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
         ])])
@@ -230,10 +235,14 @@ def build(seed=None, qemu=False, highmem=False):
 
     # Identity of the iPhone X whose userland runs here: compatible[0] is
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
-    # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
+    # (iPhone10,3). 'xiaomi,sweet' MUST stay: the unmodified sweet kernel's
+    # platform expert (patch 0016) and boot CPU driver (patch 0018) match
+    # IONameMatch 'xiaomi,sweet' only. Without it the kernel never starts
+    # the platform expert. 'google,sargo'/'qcom,sdm670' are for future
+    # sargo drivers; they do not replace the sweet match string yet.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('google,sargo') + cstr('qcom,sdm670') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('google,sargo') + cstr('qcom,sdm670') + cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),

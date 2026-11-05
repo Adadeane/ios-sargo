@@ -34,6 +34,16 @@
   build the sargo shim (drop ufs.c), build the phone ADT with --highmem,
   pack the payload (CI kernel 42059839759), first `fastboot boot` attempt.
   No flashing/erasing without Adam's explicit go-ahead for that step.
+- Update 21:53: stock DTB unpacked (359,988 bytes, header v2, offsets match
+  sweet's mkbootimg exactly); mkadt-sargo.py fixed (root compatible now
+  includes 'xiaomi,sweet' — the sweet kernel's platform expert matches
+  only that — and disp0 stays 'sweet,display' until a sargo FB driver
+  patch exists); sargo shim built (shim-sargo/, no ufs.c, FB_H 2220,
+  IMEM restart_reason 0x146bf65c, stock DTB, payload = CI kernel +
+  highmem ADT, cmdline cpus=1 rd=md0) at shim-sargo/out/shim-boot.img
+  (17,129,472 bytes, ANDROID! magic). First `fastboot boot` attempt is
+  GATED on the userdata stream finishing (D:\userdata-backup.done) —
+  do not reboot the phone before that.
 
 ## >>> SARGO UPDATE 2026-11-05 (Pepper, read first) <<<
 
