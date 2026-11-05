@@ -1,5 +1,38 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> FIRST XNU BOOT ON SARGO, 2026-11-05 22:41 (Pepper, read first) <<<
+
+**The unmodified sweet kernel BOOTED on the Pixel 3a.** fastboot boot of
+shim-sargo/out/shim-boot.img (LZ4 kernel + sargo payload + stock DTB) was
+accepted by the bootloader (Booting OKAY). The phone screen showed the full
+XNU log: platform expert registered, AppleCLCD 1080x2220 stride 4320 at
+0x9c000000, battery/HID/surface registered, no panic. Kernel idles waiting
+for a root (rd=md0, no root attached). Nothing was flashed; Android is
+untouched. Photo of the screen is with Adam.
+
+**Bootloader fixes (all in shim-sargo/, committed on sargo branch):**
+- Google ABL rejects a raw Image kernel ("Error verifying the received
+  boot.img: Unsupported"). The stock kernel is LZ4-compressed, and sunfish
+  does the same: build.sh now runs `lz4 -f -q -9 out/Image out/Image.lz4`
+  and passes Image.lz4 as --kernel. (Proven by A/B: stock kernel + stock
+  ramdisk boots; shim kernel + stock ramdisk rejected; shim kernel +
+  payload rejected. The kernel was the blocker, not the ramdisk.)
+- text_offset 0 -> 0x80000 in start.S (Google ABL rejects 0; sunfish
+  BOARD_SUNFISH).
+- os_version 17.0.0 -> 15.0.0, os_patch_level 2035-06 -> 2025-11 (matches
+  the stock LineageOS/Android 15 header).
+
+**Backups, corrected:** the userdata raw copy was ABANDONED on Adam's
+instruction 22:08 (too slow, ~12 MB/s); the partial 22.4 GB image was
+deleted. No raw userdata image exists. All other partitions are backed
+up: 71 images on the phone, 67 smalls + system_a/b + vendor_a/b (4 files,
+8,145,338,368 bytes, 13.0 MB/s) on the USB stick, 12 critical ones on
+Pepper's VM with SHA-256.
+
+**Next:** the 16G iOS root image is on Oracle (~/iosroot-build/ios16-root.img).
+Flashing it to userdata needs Adam's explicit go-ahead; there is no raw
+userdata backup to restore from if it goes wrong.
+
 ## >>> SARGO UPDATE 2026-11-05 evening (Pepper, read first) <<<
 
 **STATE at ~21:45 UTC 2026-11-05:**
@@ -10,13 +43,12 @@
 - Partition backups DONE on the phone: all by-name partitions except
   userdata dd'd to /sdcard/sargo-backup/ (71 images, 8.2G). Small set
   (67 images, ~500MB) pulled to a 64G USB stick (D:, "USB Drive") at
-  D:\sargo-backup\sargo-backup\. system/vendor images left on the phone
-  (stock, re-downloadable). boot_a/b, dtbo_a/b, vbmeta_a/b pulled to this
+  D:\sargo-backup\sargo-backup\. system/vendor images pulled to the stick
+  22:09-22:19 (4 files, 8,145,338,368 bytes). boot_a/b, dtbo_a/b, vbmeta_a/b pulled to this
   VM at ~/workspace/goals/ios-16-on-pixel-3a-sargo-via-ios-sweet/hidden_files/sargo-backups/.
-- Userdata raw image (53,648,801,280 bytes, mmcblk0p72) streaming to the
-  stick as D:\userdata.img via adb exec-out dd, started 21:37 by wmic
-  process create (PID 3884), ~11 MB/s, ETA ~80 min. Do NOT unplug the
-  stick or the phone until D:\userdata-backup.done appears.
+- Userdata raw image: ABANDONED on Adam's instruction 22:08 (too slow,
+  ~12 MB/s). The partial 22.4 GB image was deleted. No raw userdata
+  image exists.
 - Live FDT dumped from the running phone (/sys/firmware/fdt, 428,750
   bytes) and compared (fdtdump, 18,466 lines). CORRECTIONS to the hardware
   table: the upper RAM bank EXISTS (memory <0x80000000 2G>,
