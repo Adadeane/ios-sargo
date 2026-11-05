@@ -1,5 +1,51 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> SARGO UPDATE 2026-11-05 evening (Pepper, read first) <<<
+
+**STATE at ~21:45 UTC 2026-11-05:**
+- Phone is live: Pixel 3a (sargo), bootloader unlocked, slot b, booted
+  LineageOS, adb authorized, adb shell is uid=0 root. Reached via mum's
+  laptop (100.82.92.24, carol) over the Oracle hop; adb/fastboot from
+  platform-tools there.
+- Partition backups DONE on the phone: all by-name partitions except
+  userdata dd'd to /sdcard/sargo-backup/ (71 images, 8.2G). Small set
+  (67 images, ~500MB) pulled to a 64G USB stick (D:, "USB Drive") at
+  D:\sargo-backup\sargo-backup\. system/vendor images left on the phone
+  (stock, re-downloadable). boot_a/b, dtbo_a/b, vbmeta_a/b pulled to this
+  VM at ~/workspace/goals/ios-16-on-pixel-3a-sargo-via-ios-sweet/hidden_files/sargo-backups/.
+- Userdata raw image (53,648,801,280 bytes, mmcblk0p72) streaming to the
+  stick as D:\userdata.img via adb exec-out dd, started 21:37 by wmic
+  process create (PID 3884), ~11 MB/s, ETA ~80 min. Do NOT unplug the
+  stick or the phone until D:\userdata-backup.done appears.
+- Live FDT dumped from the running phone (/sys/firmware/fdt, 428,750
+  bytes) and compared (fdtdump, 18,466 lines). CORRECTIONS to the hardware
+  table: the upper RAM bank EXISTS (memory <0x80000000 2G>,
+  <0x100000000 0x7e2c0000>); a watchdog EXISTS (qcom,wdt@17980000).
+  Timer 19.2 MHz and virtual-timer PPI 19 VERIFIED. Panel has three
+  variants in the DT (s6e3fa7 1080x2220 confirmed present, plus sofef00
+  and nt37700f at 1080x2160). Touch/PMIC/SPMI/GIC/PSCI/FB confirmed.
+  Table updated: sargo-hardware-table.md (Live FDT verification section).
+- mkadt-sargo.py revised for the live FDT (commit on sargo branch):
+  --highmem restored (HIGH_MEM_SIZE 0x7e2c0000, sweet pattern),
+  TIMEBASE/VTIMER marked VERIFIED, UNVERIFIED warnings dropped.
+  Verified: low ADT dram 0xb0000000/0x4ef00000, high ADT
+  0x100000000/0x7e1c0000, both 12,576 bytes.
+- Next: unpack the stock DTB from boot_b.img (tools/unpack_bootv2.py),
+  build the sargo shim (drop ufs.c), build the phone ADT with --highmem,
+  pack the payload (CI kernel 42059839759), first `fastboot boot` attempt.
+  No flashing/erasing without Adam's explicit go-ahead for that step.
+
+## >>> SARGO UPDATE 2026-11-05 (Pepper, read first) <<<
+
+**STATE at ~16:06 UTC 2026-11-05:**
+- CI kernel build SUCCEEDED: Adadeane/ios-sweet run 42059839759 (main, unmodified xnu), 15:55:12-16:03:26Z, conclusion success. Fork branches: main, sargo, sunfish; Actions enabled. (Verified via `gh api`, not just the chat message.)
+- Artifact downloaded + verified: `~/workspace/ios-sweet-fork/artifacts/42059839759` (171M). `xnu-kernel/kernel.development.sweet` is Mach-O 64-bit arm64, `sha256sum -c SHA256SUMS` = OK. Also kdk-libs + buildtree.tgz.
+- QEMU payload built from that kernel: `/tmp/payload-qemu-42059839759.bin` (16.6MB) via `tools/mkadt.py /tmp/qemu-42059839759.adt --qemu` + `tools/mkpayload.py` (cmdline `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam rd=md0`). mkadt warns `research/ipsw-x/d22ap.adt` missing, no /product node — known, same as sweet.
+- BLOCKED: QEMU boot test cannot run on this box right now. `qemu-system-aarch64` is NOT installed; `tools/qemu-sweet.py --check-env` exits 1; dpkg has no qemu/llvm/aarch64-gcc; dpkg.log has no qemu entries; the qemu .debs in /var/cache/apt/archives are dated 2026-07-09. The 15:29 chat message saying QEMU 8.2.2 was installed and check-env passed does not match this box's current state — reinstall with `sudo apt install qemu-system-arm llvm` (per docs/QEMU_TESTING.md) and rerun check-env before trusting that claim. No `shim/out/` or boot image on disk here either (the 15:29-15:30 shim-compile/mkbootimg-wrap claims have no artifacts on disk; the mkbootimg workaround copy DOES exist at `~/workspace/tools/mkbootimg`, 15:29; `tools/mkadt-sargo.py` exists, 15:30).
+- Next: install QEMU, then run the 20s smoke test: `python3 tools/qemu-sweet.py /tmp/payload-qemu-42059839759.bin /tmp/qemu_run_42059839759 --secs 20 --kernel artifacts/42059839759/xnu-kernel/kernel.development.sweet --fail-on-panic` (payload is in /tmp and may vanish between sessions — rebuild with mkadt+mkpayload if gone; the kernel artifact in the fork dir is durable).
+- Still blocked on Adam: wake the 3a, confirm it boots LineageOS + fastboot, say if its Android data is expendable. That unlocks the live device-tree dump (timer freq, virtual timer ID, panel command-vs-video mode).
+- Sargo hardware table (corrected 2026-11-05): eMMC 5.1 NOT UFS (SDHCI 0x7c4000); Synaptics S3706 touch; Samsung S6E3FA7 panel 1080x2220; PM660+PM660L; two RAM banks, low 2G at 0x80000000 + upper ~1.97G at 0x100000000 (live FDT, corrected evening 2026-11-05); GIC same as sweet. Table: `~/workspace/goals/ios-16-on-pixel-3a-sargo-via-ios-sweet/hidden_files/sargo-hardware-table.md`. Antigravity handoff doc from 2026-11-04 is partly wrong on storage — correction added at its top.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

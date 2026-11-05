@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 """Build the minimal Apple Device Tree that the SARGO xnu needs to boot.
 
-SARGO variant of mkadt.py, 5 Nov 2026. PROVISIONAL: timer frequency and
-virtual timer ID are UNVERIFIED (do not trust TIMEBASE/VTIMER_INTID until
-the live sargo FDT is dumped). Highmem is deleted: sargo has no upper
-bank. UFS node is deleted: sargo is eMMC, storage driver is a later step.
-Usage:  mkadt-sargo.py OUT.adt [--dump] [--qemu]
+SARGO variant of mkadt.py, 5 Nov 2026, revised with the live sargo FDT
+(dumped from the running phone 5 Nov 2026, /sys/firmware/fdt).
+TIMEBASE (19.2 MHz) and VTIMER_INTID (19) are VERIFIED from the live FDT.
+Highmem EXISTS: the live memory node is <0x80000000 2G>,
+<0x100000000 0x7e2c0000>, so --highmem switches the dram window to the
+upper bank (sweet's pattern). UFS node is deleted: sargo is eMMC, storage
+driver is a later step.
+Usage:  mkadt-sargo.py OUT.adt [--dump] [--qemu] [--highmem]
 """
 import hashlib, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adt  # noqa: E402
 
-# Kernel-managed RAM: above every Qualcomm XPU carve-out (see NOTES.md)
-PHYS_BASE = 0xb0000000  # provisional, above sargo reserved memory to ~0xa1c00000
+# Kernel-managed RAM: above every Qualcomm XPU carve-out. Live FDT
+# reserved-memory ends at ~0x9f800000, so 0xb0000000 is clear.
+PHYS_BASE = 0xb0000000
 MEM_SIZE = 0x4f000000
+# --highmem (phone only): the whole upper DDR bank. Live FDT memory node is
+# <0x80000000 2G>, <0x100000000 0x7e2c0000>; every fixed reserved-memory
+# carve-out is in the low bank. Mirrors sweet's --highmem pattern.
+HIGH_PHYS_BASE = 0x100000000
+HIGH_MEM_SIZE = 0x7e2c0000
 # Panic log buffer, carved from the TOP of the dram range and exposed to XNU as
 # /pram + /chosen/embedded-panic-log-size. Without it, pe_init.c's
 # check_for_panic_log() leaves gPanicBase == 0, debug_log_init() bails out twice
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
-# --highmem DELETED for sargo: no upper DDR bank on Pixel 3a (4 GiB, single
-# low bank 0x80000000). Passing --highmem is an error in this variant.
 # /arm-io children are relative to this; it must not be 0 (serial_init bails)
 SOC_BASE = 0x01000000
 
@@ -33,8 +40,8 @@ SARGO_ECID = 0x534152474f000001  # 'SARGO' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2220, 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
-TIMEBASE = 19200000  # UNVERIFIED for sargo, read CNTFRQ from live device
-VTIMER_INTID = 19  # UNVERIFIED for sargo, confirm against live FDT
+TIMEBASE = 19200000  # VERIFIED live FDT 5 Nov 2026: timer clock-frequency 0x124f800
+VTIMER_INTID = 19  # VERIFIED live FDT: virtual timer is the 3rd entry (1,3,0xf08), PPI 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
@@ -75,10 +82,8 @@ def node(name, props=(), children=()):
 
 
 def build(seed=None, qemu=False, highmem=False):
-    if highmem:
-        raise SystemExit('mkadt-sargo: --highmem is deleted, sargo has no upper bank')
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
-    phys_base, mem_size = PHYS_BASE, MEM_SIZE
+    phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -240,7 +245,6 @@ def build(seed=None, qemu=False, highmem=False):
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv)
-    print('WARNING: sargo TIMEBASE/VTIMER_INTID are UNVERIFIED, see mkadt-sargo.py header', file=sys.stderr)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
