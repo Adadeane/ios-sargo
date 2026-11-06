@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,723 @@
+@@ -0,0 +1,724 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -755,6 +755,7 @@ index 0000000..eb89c23
 +int
 +sargo_sdhci_rootdev(dev_t *dev)
 +{
++	panic("SARGO SDHCI rootdev called");
 +	if (!ss.ready) {
 +		int error = sargo_sdhci_init();
 +		if (error) {
