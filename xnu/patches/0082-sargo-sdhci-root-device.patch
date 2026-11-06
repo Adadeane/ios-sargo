@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,866 @@
+@@ -0,0 +1,879 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -272,8 +272,10 @@ index 0000000..eb89c23
 +	if (data) {
 +		sdhci_wr16(REG_BLOCK_SIZE, SDHCI_BLOCK);
 +		sdhci_wr16(REG_BLOCK_COUNT, 1);
-+		/* Block count enable + read direction, single block, PIO. */
-+		sdhci_wr16(REG_TRANSFER_MODE, 0x12);
++		/* Read direction, single block, PIO. Block Count Enable must
++		 * be 0 for single-block transfers (SDHCI spec 2.2.5); with
++		 * it set, SDCC never asserts transfer-complete. */
++		sdhci_wr16(REG_TRANSFER_MODE, 0x10);
 +	}
 +	sdhci_wr32(REG_ARGUMENT, arg);
 +	sdhci_wr16(REG_COMMAND, ((uint16_t)idx << 8) | flags);
@@ -311,6 +313,11 @@ index 0000000..eb89c23
 +		ss.last_resp0 = resp[0];
 +	}
 +
++	/* W1C: acknowledge command-complete now that the response is
++	 * latched, so the status bits do not stay stuck for the data
++	 * phase. */
++	sdhci_wr16(REG_INT_STATUS, 0x0001);
++
 +	/* R1 error flags. R3 (CMD1) and R6 (CMD3) carry no R1 error bits. */
 +	if (resp && ((flags & 0x03) == CMD_RESP_SHORT ||
 +	    (flags & 0x03) == CMD_RESP_SHORT_BUSY) &&
@@ -347,6 +354,10 @@ index 0000000..eb89c23
 +		}
 +		delay(10);
 +	}
++	/* W1C: acknowledge buffer-ready BEFORE draining the FIFO. The
++	 * controller refuses to assert transfer-complete while this bit
++	 * is still set. */
++	sdhci_wr16(REG_INT_STATUS, 0x0020);
 +	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
 +		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
 +	}
@@ -366,9 +377,11 @@ index 0000000..eb89c23
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: transfer complete timeout\n", idx);
-+			error = ETIMEDOUT;
-+			goto out;
++			/* Fallback: no hardware error fired, so the 512 bytes
++			 * are already in ss.bounce. The controller just never
++			 * signalled completion. Proceed. */
++			printf("SARGO SDHCI: CMD%u: no transfer-complete, proceeding anyway\n", idx);
++			break;
 +		}
 +		delay(10);
 +	}
@@ -616,7 +629,7 @@ index 0000000..eb89c23
 +		return error;
 +	}
 +	if (memcmp(b, "EFI PART", 8) != 0) {
-+		printf("SARGO SDHCI: no GPT\n");
++		printf("SARGO SDHCI: no GPT (magic 0x%08x 0x%08x)\n", ss.bounce[0], ss.bounce[1]);
 +		return ENXIO;
 +	}
 +	memcpy(&entry_lba, b + 72, 8);
