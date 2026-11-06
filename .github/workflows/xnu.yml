@@ -34,9 +34,14 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
+    # macos-14 was retired by GitHub on 2026-11-02 (jobs on it are now
+    # cancelled with "configuration not supported"). macos-15 is the
+    # closest supported arm64 label. NOTE: macos-14 shipped Xcode 15.x,
+    # whose iig matches the xnu-8796 IORPC ABI; Xcode 16's iig emits
+    # IORPC.kernelContent, which this xnu lacks. The build picks the
+    # lowest-versioned Xcode on the runner; if macos-15 only has
+    # Xcode 16 and the iig ABI bites, the build log will show it.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
