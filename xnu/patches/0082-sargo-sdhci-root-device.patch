@@ -1,10 +1,11 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
- 
- bsd/dev/memdev.c			standard
- bsd/dev/sweet_ufs.c			standard
+@@ -110,7 +110,8 @@
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
 +bsd/dev/sargo_sdhci.c			standard
  bsd/dev/mem.c				standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
