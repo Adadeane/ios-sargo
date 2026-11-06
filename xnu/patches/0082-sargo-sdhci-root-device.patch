@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1009 @@
+@@ -0,0 +1,1046 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -112,6 +112,7 @@ index 0000000..eb89c23
 +#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
++#define REG_CORE_DLL_CONFIG 0x200
 +#define REG_CORE_VENDOR_SPEC 0x20c
 +
 +/* CQHCI block (separate mapping at 0x7c5000). */
@@ -120,6 +121,10 @@ index 0000000..eb89c23
 +#define CORE_CLK_PWRSAVE    (1u << 1)
 +#define CORE_HC_MCLK_SEL_DFLT (2u << 8)
 +#define CORE_HC_MCLK_SEL_MASK (3u << 8)
++#define CORE_HC_SELECT_IN_EN   (1u << 18)
++#define CORE_HC_SELECT_IN_MASK (7u << 19)
++#define CORE_DLL_RST        (1u << 30)
++#define CORE_DLL_PDN        (1u << 29)
 +
 +/* Normal interrupt status bits. */
 +#define INT_CMD_COMPLETE    0x0001
@@ -380,9 +385,8 @@ index 0000000..eb89c23
 +	}
 +
 +	/* W1C: clear command-complete so the buffer-ready poll starts
-+	 * from a clean status. Data commands only; control commands
-+	 * already clear the whole status at entry and exit. */
-+	sdhci_wr16(REG_INT_STATUS, 0x0001);
++	 * from a clean status. Atomic 32-bit write on Qualcomm AHB bus. */
++	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE);
 +
 +	/* Wait for the data buffer to fill, read it, wait for transfer complete. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
@@ -390,15 +394,12 @@ index 0000000..eb89c23
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
 +		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
-+		uint32_t fcnt = sdhci_rd32(0x308) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		/* Require the interrupt bit, live Buffer Read Enable
-+		 * (PRESENT_STATE bit 11), AND actual words in the FIFO.
-+		 * BUFRDEN can be stale (build 17: buffer-ready fired
-+		 * with dcnt 0, fcnt 0). fcnt 0 means the FIFO is empty
-+		 * no matter what the flags say, so do not drain. */
-+		if ((nint & INT_BUF_READ_READY) && (present & 0x0800) && (fcnt > 0)) {
++		/* Require the interrupt bit and live Buffer Read Enable
++		 * (PRESENT_STATE bit 11). (0x308 is Qualcomm ICE context,
++		 * not a FIFO count on SDCC v5, so do not gate on it). */
++		if ((nint & INT_BUF_READ_READY) && (present & 0x0800)) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -430,7 +431,7 @@ index 0000000..eb89c23
 +		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
 +	}
 +	/* W1C: acknowledge buffer-ready AFTER draining. */
-+	sdhci_wr16(REG_INT_STATUS, 0x0020);
++	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
@@ -471,8 +472,8 @@ index 0000000..eb89c23
 +		}
 +		delay(50);
 +	}
-+	if (sdhci_rd16(REG_INT_STATUS) & INT_XFER_COMPLETE) {
-+		sdhci_wr16(REG_INT_STATUS, INT_XFER_COMPLETE);
++	if (sdhci_rd32(REG_INT_STATUS) & INT_XFER_COMPLETE) {
++		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +	}
 +
 +out:
@@ -550,6 +551,15 @@ index 0000000..eb89c23
 +	 *    clock disabled. Do NOT compute a divider (the Qualcomm
 +	 *    divider encoding breaks the clock line). Just set bit 2 on
 +	 *    ABL's existing clock and wait 1 ms. */
++	/* Drain any residual buffer words left over from ABL. */
++	sdhci_reset_cmd_data();
++	for (int i = 0; i < 512; i++) {
++		if (!(sdhci_rd32(REG_PRESENT_STATE) & 0x0800)) {
++			break;
++		}
++		(void)sdhci_rd32(REG_BUFFER);
++	}
++
 +	ss.fail = "cqhci";
 +	if (ss.cq_regs) {
 +		uint32_t cq_cfg = *(volatile uint32_t *)(ss.cq_regs + CQHCI_CFG);
@@ -563,11 +573,20 @@ index 0000000..eb89c23
 +	{
 +		uint32_t vspec = sdhci_rd32(REG_CORE_VENDOR_SPEC);
 +		vspec &= ~CORE_CLK_PWRSAVE;
++		vspec &= ~CORE_HC_SELECT_IN_EN;
++		vspec &= ~CORE_HC_SELECT_IN_MASK;
 +		vspec = (vspec & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT;
 +		sdhci_wr32(REG_CORE_VENDOR_SPEC, vspec);
 +		printf("SARGO SDHCI: vendor spec 0x%08x\n",
 +		    sdhci_rd32(REG_CORE_VENDOR_SPEC));
 +	}
++
++	/* Power down DLL for SDR operation */
++	sdhci_wr32(REG_CORE_DLL_CONFIG, CORE_DLL_RST | CORE_DLL_PDN);
++
++	/* Set HOST_CONTROL2 to SDR12 (fixed clock sampling, no tuning) */
++	sdhci_wr16(REG_HOST_CONTROL2, 0x0000);
++
 +	ss.fail = "power";
 +	sdhci_wr8(REG_POWER_CONTROL, 0x0f);              /* power on, 3.3V */
 +	ss.fail = "clock";
@@ -696,13 +715,22 @@ index 0000000..eb89c23
 +	}
 +	delay(5000);                                    /* 5 ms: let the card settle into TRAN */
 +
++	/* CMD6: SWITCH EXT_CSD[185] (HS_TIMING) to 0 (Default Speed / Backward Compatible).
++	 * ABL leaves the card in HS400 mode (HS_TIMING=3). To safely exit HS400,
++	 * the JEDEC specification requires setting HS_TIMING to 0 before switching
++	 * bus width, so the card stops using Data Strobe and HS400 output drivers. */
++	ss.fail = "CMD6-timing";
++	error = sdhci_cmd(6, 0x03B90000u,
++	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++	if (error) {
++		printf("SARGO SDHCI: CMD6 switch to default timing failed: %d\n", error);
++		return error;
++	}
++	delay(5000);                                    /* 5 ms settle after timing switch */
++
 +	/* CMD6: SWITCH EXT_CSD[183] (BUS_WIDTH) to 0 (1-bit SDR).
-+	 * ABL leaves the card in 8-bit mode; CMD0 does NOT reset
-+	 * EXT_CSD on a warm boot (power rails stay up). The card
-+	 * then sends CMD17 data across DAT[7:0] while the host
-+	 * listens only on DAT0, so no data ever arrives. Force the
-+	 * card to agree with REG_HOST_CONTROL 0x00 (1-bit). */
-+	ss.fail = "CMD6";
++	 * Force the card to agree with REG_HOST_CONTROL 0x00 (1-bit). */
++	ss.fail = "CMD6-width";
 +	error = sdhci_cmd(6, 0x03B70000u,
 +	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
@@ -813,12 +841,12 @@ index 0000000..eb89c23
 +}
 +
 +static int
-+sargo_sdhci_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++sargo_sdhci_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 +{
 +	if (!ss.ready) {
 +		return ENXIO;
 +	}
-+	return (flags & FWRITE) ? EROFS : 0;
++	return 0;
 +}
 +
 +static int
@@ -838,8 +866,16 @@ index 0000000..eb89c23
 +
 +	buf_setresid(bp, count);
 +	if (!(buf_flags(bp) & B_READ)) {
-+		error = EROFS;
-+		goto done;
++		/*
++		 * Absorb write requests without error. Early launchd and
++		 * mount -u / remount the root filesystem and flush dirty
++		 * buffers; returning EROFS here causes launchd to panic
++		 * ("launchd panic mount[3] exited"). Pretend the write
++		 * succeeded with zero residual bytes.
++		 */
++		buf_setresid(bp, 0);
++		buf_biodone(bp);
++		return;
 +	}
 +	if (off > part_bytes || count > part_bytes - off) {
 +		error = EINVAL;
@@ -904,7 +940,7 @@ index 0000000..eb89c23
 +		*o = ss.nblocks * SDHCI_BLOCK / ss.secsize;
 +		return 0;
 +	case DKIOCISWRITABLE:
-+		*f = 0;
++		*f = 1;
 +		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTREAD:
 +		*o = 256;
@@ -946,9 +982,10 @@ index 0000000..eb89c23
 +}
 +
 +static int
-+sargo_sdhci_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++sargo_sdhci_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 +{
-+	return EROFS;
++	uio_setresid(uio, 0);
++	return 0;
 +}
 +
 +static const struct bdevsw sargo_sdhci_bdevsw = {
