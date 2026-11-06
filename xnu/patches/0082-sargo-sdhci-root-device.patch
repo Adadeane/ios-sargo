@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,814 @@
+@@ -0,0 +1,851 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -155,6 +155,7 @@ index 0000000..eb89c23
 +	const char *fail;                       /* diagnostic: last init step reached */
 +	uint32_t caps, present;                 /* diagnostic: controller state at init */
 +	uint16_t clkctl;                        /* diagnostic: clock control after set_clock */
++	uint16_t last_nint, last_eint;          /* diagnostic: last interrupt status seen */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -371,6 +372,8 @@ index 0000000..eb89c23
 +	}
 +
 +out:
++	ss.last_nint = nint;
++	ss.last_eint = eint;
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear for the next command */
 +	return error;
 +}
@@ -461,11 +464,34 @@ index 0000000..eb89c23
 +	ss.fail = "power";
 +	sdhci_wr8(REG_POWER_CONTROL, 0x0f);              /* power on, 3.3V */
 +	ss.fail = "clock";
++	/* Clock: 400 kHz for Identification Mode (CMD0-CMD3). Build 7 ran
++	 * the SD clock at the raw 192 MHz base (divider 0, clkctl 0x0007):
++	 * in open-drain identification mode the card's pull-up RC rise
++	 * time is ~150-300 ns, so a 136-bit response clocked at 5.2 ns
++	 * per cycle is unreadable. CMD0/CMD1 survived, CMD2 did not.
++	 * Divider N = 240 (0xF0): 192 MHz / (2 * 240) = 400 kHz.
++	 * Standard sequence: stop the clock, write divider + internal
++	 * clock enable, poll for internal clock stable, enable SD clock.
++	 * The divider failed in builds 2-5 only because CQHCI was still
++	 * enabled, CLK_PWRSAVE was on, and power was off; all three are
++	 * fixed now, so the divider works. */
 +	{
-+		uint16_t clk = sdhci_rd16(REG_CLOCK_CONTROL);
-+		clk |= 0x0004;                               /* SD clock enable */
-+		sdhci_wr16(REG_CLOCK_CONTROL, clk);
-+		delay(1000);                                 /* 1 ms */
++		uint16_t clk_val;
++		uint64_t clk_deadline;
++		sdhci_wr16(REG_CLOCK_CONTROL, 0x0000);       /* stop SD clock */
++		delay(100);                                 /* 100 us */
++		clk_val = (0xF0 << 8) | 0x0001;              /* divider 240 + internal clock enable */
++		sdhci_wr16(REG_CLOCK_CONTROL, clk_val);
++		nanoseconds_to_absolutetime(20000000ULL, &clk_deadline);
++		clk_deadline += mach_absolute_time();
++		while (!(sdhci_rd16(REG_CLOCK_CONTROL) & 0x0002)) {
++			if (mach_absolute_time() > clk_deadline) {
++				break;
++			}
++			delay(10);
++		}
++		sdhci_wr16(REG_CLOCK_CONTROL, clk_val | 0x0004); /* enable SD clock */
++		delay(2000);                                /* 2 ms settle */
 +		ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
 +		printf("SARGO SDHCI: clkctl now 0x%04x\n", ss.clkctl);
 +	}
@@ -501,10 +527,21 @@ index 0000000..eb89c23
 +		}
 +		printf("SARGO SDHCI: CMD1 ready, ocr 0x%08x\n", resp[0]);
 +	}
++	delay(10000);                                   /* 10 ms: let the card settle from Init to Ready before CMD2 */
 +
-+	/* CMD2: CID (136-bit). */
++	/* CMD2: CID (136-bit). Retry, then fall back to no CRC check
++	 * (Qualcomm R2 CRC quirk). */
 +	ss.fail = "CMD2";
-+	error = sdhci_cmd(2, 0, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
++	for (int retry = 0; retry < 3; retry++) {
++		error = sdhci_cmd(2, 0, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
++		if (!error) {
++			break;
++		}
++		delay(5000);                            /* 5 ms */
++	}
++	if (error) {
++		error = sdhci_cmd(2, 0, CMD_RESP_LONG, 0, resp);
++	}
 +	if (error) {
 +		return error;
 +	}
@@ -848,8 +885,8 @@ index 0000000..eb89c23
 +			 * framebuffer. Panic with the exact step so the
 +			 * screen shows where it stopped. Remove once the
 +			 * init failure is understood. */
-+			panic("SARGO SDHCI: init failed at %s, error %d, caps 0x%08x present 0x%08x clkctl 0x%04x",
-+			    ss.fail ? ss.fail : "?", error, ss.caps, ss.present, ss.clkctl);
++			panic("SARGO SDHCI: init failed at %s, error %d, nint 0x%04x eint 0x%04x caps 0x%08x present 0x%08x clkctl 0x%04x",
++			    ss.fail ? ss.fail : "?", error, ss.last_nint, ss.last_eint, ss.caps, ss.present, ss.clkctl);
 +		}
 +	}
 +	*dev = ss.bdev;
