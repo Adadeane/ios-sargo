@@ -39,10 +39,15 @@ workflows:
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
           sw_vers
+          # Codemagic's `xcode: 16.2` environment key already selects the
+          # Xcode; do NOT run xcode-select -s here. The previous version
+          # guessed the path with `ls -d /Applications/Xcode_*.app` and
+          # ended up setting DEVELOPER_DIR=/Contents/Developer, which
+          # does not exist, so build.sh died with "Xcode Command Line
+          # Tools not found". Just verify the selection is sane.
           ls -d /Applications/Xcode*.app
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
-          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> $CM_ENV
-          sudo xcode-select -s "$XC"
+          xcode-select -p
+          test -d "$(xcode-select -p)"
           xcodebuild -version
           xcrun --find iig
       - name: Build
