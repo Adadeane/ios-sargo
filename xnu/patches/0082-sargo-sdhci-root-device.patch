@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,908 @@
+@@ -0,0 +1,925 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -380,13 +380,16 @@ index 0000000..eb89c23
 +		}
 +		delay(10);
 +	}
-+	/* W1C: acknowledge buffer-ready BEFORE draining the FIFO. The
-+	 * controller refuses to assert transfer-complete while this bit
-+	 * is still set. */
-+	sdhci_wr16(REG_INT_STATUS, 0x0020);
++	/* Drain the FIFO FIRST. Clearing buffer-ready before draining
++	 * closes the data gate on SDCC and the reads return zeros
++	 * (build 12 returned a zero buffer and missed the GPT magic).
++	 * SDHCI spec 3.7.2: wait for buffer-ready, drain the FIFO,
++	 * then clear buffer-ready. */
 +	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
 +		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
 +	}
++	/* W1C: acknowledge buffer-ready AFTER draining. */
++	sdhci_wr16(REG_INT_STATUS, 0x0020);
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
@@ -651,15 +654,29 @@ index 0000000..eb89c23
 +	const uint8_t *b = (const uint8_t *)ss.bounce;
 +	uint64_t entry_lba, first, last;
 +	uint32_t nent, esz;
++	uint16_t mbr_sig;
 +	int error;
++
++	/* Test read: LBA 0 (protective MBR). If the PIO read path works,
++	 * the signature at offset 510 is 0xaa55. If it reads zeros, the
++	 * FIFO is returning nothing. */
++	error = sdhci_read_block(0);
++	if (error) {
++		panic("SARGO SDHCI: LBA 0 read failed error %d", error);
++	}
++	mbr_sig = *(const uint16_t *)&b[510];
++	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
++	if (mbr_sig != 0xaa55) {
++		panic("SARGO SDHCI: LBA 0 bad MBR sig 0x%04x b0 0x%08x", mbr_sig, ss.bounce[0]);
++	}
 +
 +	error = sdhci_read_block(1);
 +	if (error) {
 +		return error;
 +	}
 +	if (memcmp(b, "EFI PART", 8) != 0) {
-+		printf("SARGO SDHCI: no GPT (magic 0x%08x 0x%08x)\n", ss.bounce[0], ss.bounce[1]);
-+		return ENXIO;
++		panic("SARGO SDHCI: no GPT, b0 0x%08x b1 0x%08x b510 0x%04x",
++		      ss.bounce[0], ss.bounce[1], *(const uint16_t *)&b[510]);
 +	}
 +	memcpy(&entry_lba, b + 72, 8);
 +	memcpy(&nent, b + 80, 4);
