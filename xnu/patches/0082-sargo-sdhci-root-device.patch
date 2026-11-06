@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,763 @@
+@@ -0,0 +1,774 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -108,6 +108,8 @@ index 0000000..eb89c23
 +#define REG_TIMEOUT_CONTROL 0x2e
 +#define REG_SOFTWARE_RESET  0x2f
 +#define REG_INT_STATUS      0x30    /* normal (low 16) + error (high 16) */
++#define REG_INT_STATUS_EN   0x34    /* interrupt status enable (must be set for status bits to latch) */
++#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
 +
@@ -411,6 +413,15 @@ index 0000000..eb89c23
 +	}
 +	printf("SARGO SDHCI: after reset present 0x%08x clkctl 0x%04x\n",
 +	    sdhci_rd32(REG_PRESENT_STATE), sdhci_rd16(REG_CLOCK_CONTROL));
++
++	/* Enable the interrupt status bits we poll. The SDHCI spec gates
++	 * the status bits on this register: with it at 0 (reset state, or
++	 * however ABL left it) INT_CMD_COMPLETE never latches and every
++	 * command times out. This is the CMD0 timeout. */
++	sdhci_wr32(REG_INT_STATUS_EN, 0xffffffffu);
++	sdhci_wr32(REG_INT_SIGNAL_EN, 0xffffffffu);
++	printf("SARGO SDHCI: int status enable 0x%08x\n",
++	    sdhci_rd32(REG_INT_STATUS_EN));
 +
 +	/* 1-bit bus: the card reverts to 1-bit on CMD0, so the host must agree. */
 +	sdhci_wr8(REG_HOST_CONTROL, 0x00);
