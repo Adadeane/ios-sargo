@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1001 @@
+@@ -0,0 +1,1008 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -158,6 +158,7 @@ index 0000000..eb89c23
 +	uint16_t last_nint, last_eint;          /* diagnostic: last interrupt status seen */
 +	uint32_t last_resp0;                    /* diagnostic: RESPONSE0 of the last command */
 +	uint32_t last_pres;                     /* diagnostic: PRESENT_STATE at a data timeout */
++	uint32_t last_dcnt, last_fcnt;          /* diagnostic: data/FIFO counts at a data timeout */
 +	const char *data_fail;                  /* diagnostic: which data-phase step failed */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
@@ -389,12 +390,15 @@ index 0000000..eb89c23
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
 +		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
++		uint32_t fcnt = sdhci_rd32(0x308) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		/* Require both the interrupt bit and the live Buffer Read
-+		 * Enable (PRESENT_STATE bit 11). The interrupt can be
-+		 * latched while the FIFO is actually empty (build 13). */
-+		if ((nint & INT_BUF_READ_READY) && (present & 0x0800)) {
++		/* Require the interrupt bit, live Buffer Read Enable
++		 * (PRESENT_STATE bit 11), AND actual words in the FIFO.
++		 * BUFRDEN can be stale (build 17: buffer-ready fired
++		 * with dcnt 0, fcnt 0). fcnt 0 means the FIFO is empty
++		 * no matter what the flags say, so do not drain. */
++		if ((nint & INT_BUF_READ_READY) && (present & 0x0800) && (fcnt > 0)) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -408,6 +412,8 @@ index 0000000..eb89c23
 +		if (mach_absolute_time() > deadline) {
 +			printf("SARGO SDHCI: CMD%u: buffer read ready timeout\n", idx);
 +			ss.last_pres = sdhci_rd32(REG_PRESENT_STATE);
++			ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
++			ss.last_fcnt = sdhci_rd32(0x308) & 0xffff;
 +			error = ETIMEDOUT;
 +			ss.data_fail = "buf-timeout";
 +			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
@@ -452,6 +458,8 @@ index 0000000..eb89c23
 +			uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
 +			if (p & 0x0004) {        /* Bit 2: DAT Line Active */
 +				ss.last_pres = p;
++				ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
++				ss.last_fcnt = sdhci_rd32(0x308) & 0xffff;
 +				error = ETIMEDOUT;
 +				ss.data_fail = "xfer-active";
 +				sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
@@ -732,8 +740,7 @@ index 0000000..eb89c23
 +		panic("SARGO: LBA 0 read failed error %d (%s)\n"
 +		      "pres 0x%08x dcnt %u fcnt %u",
 +		      error, ss.data_fail ? ss.data_fail : "?",
-+		      sdhci_rd32(REG_PRESENT_STATE),
-+		      sdhci_rd32(0x35c) & 0xffff, sdhci_rd32(0x308) & 0xffff);
++		      ss.last_pres, ss.last_dcnt, ss.last_fcnt);
 +	}
 +	mbr_sig = *(const uint16_t *)&b[510];
 +	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
