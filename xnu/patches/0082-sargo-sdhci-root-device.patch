@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,908 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -200,6 +200,31 @@ index 0000000..eb89c23
 +}
 +
 +/*
++ * Reset the SDHCI command and data lines. The controller leaves the
++ * command line inhibited after a command timeout; without a reset the
++ * next command fails with EBUSY and the retry loop is useless (build
++ * 10: CMD2 attempt 1 timed out, then attempts 2, 3 and the no-CRC
++ * fallback all died with EBUSY). The reset bits are self-clearing;
++ * poll for them with a short timeout. This only resets the CMD/DAT
++ * lines, not the host, so the clock and power ABL left behind are
++ * untouched.
++ */
++static void
++sdhci_reset_cmd_data(void)
++{
++	uint64_t deadline;
++	sdhci_wr8(REG_SOFTWARE_RESET, 0x06);        /* reset CMD + DAT lines */
++	nanoseconds_to_absolutetime(100000000ULL, &deadline);
++	deadline += mach_absolute_time();
++	while (sdhci_rd8(REG_SOFTWARE_RESET) & 0x06) {
++		if (mach_absolute_time() > deadline) {
++			break;
++		}
++		delay(10);
++	}
++}
++
++/*
 + * Set the SD clock to hz. SDCLK = base / (2 * divider); divider 0 means
 + * the base clock. If the Capabilities base clock is not believable the
 + * clock is left exactly as ABL left it (which must already work, since
@@ -262,6 +287,7 @@ index 0000000..eb89c23
 +	while (sdhci_rd32(REG_PRESENT_STATE) & (data ? 0x3u : 0x1u)) {
 +		if (mach_absolute_time() > deadline) {
 +			printf("SARGO SDHCI: CMD%u: command line busy\n", idx);
++			sdhci_reset_cmd_data();
 +			return EBUSY;
 +		}
 +		delay(10);
@@ -389,6 +415,9 @@ index 0000000..eb89c23
 +out:
 +	ss.last_nint = nint;
 +	ss.last_eint = eint;
++	if (error) {
++		sdhci_reset_cmd_data();
++	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear for the next command */
 +	return error;
 +}
