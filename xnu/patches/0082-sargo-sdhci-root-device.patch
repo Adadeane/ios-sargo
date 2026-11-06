@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,969 @@
+@@ -0,0 +1,982 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -158,6 +158,7 @@ index 0000000..eb89c23
 +	uint16_t last_nint, last_eint;          /* diagnostic: last interrupt status seen */
 +	uint32_t last_resp0;                    /* diagnostic: RESPONSE0 of the last command */
 +	uint32_t last_pres;                     /* diagnostic: PRESENT_STATE at a data timeout */
++	const char *data_fail;                  /* diagnostic: which data-phase step failed */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -282,6 +283,8 @@ index 0000000..eb89c23
 +	uint16_t nint, eint;
 +	int error = 0;
 +
++	ss.data_fail = NULL;
++
 +	/* Wait until the command line is free (and the data line, for data). */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
@@ -338,11 +341,13 @@ index 0000000..eb89c23
 +			error = (eint & EINT_CMD_TIMEOUT) ? ETIMEDOUT : EIO;
 +			printf("SARGO SDHCI: CMD%u: error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
++			ss.data_fail = "cmd-err";
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
 +			printf("SARGO SDHCI: CMD%u: command complete timeout\n", idx);
 +			error = ETIMEDOUT;
++			ss.data_fail = "cmd-timeout";
 +			goto out;
 +		}
 +		delay(10);
@@ -392,6 +397,7 @@ index 0000000..eb89c23
 +			error = (eint & EINT_DATA_TIMEOUT) ? ETIMEDOUT : EIO;
 +			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
++			ss.data_fail = "data-err";
 +			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
@@ -399,6 +405,7 @@ index 0000000..eb89c23
 +			printf("SARGO SDHCI: CMD%u: buffer read ready timeout\n", idx);
 +			ss.last_pres = sdhci_rd32(REG_PRESENT_STATE);
 +			error = ETIMEDOUT;
++			ss.data_fail = "buf-timeout";
 +			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
@@ -427,6 +434,7 @@ index 0000000..eb89c23
 +			error = EIO;
 +			printf("SARGO SDHCI: CMD%u: transfer error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
++			ss.data_fail = "xfer-err";
 +			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
@@ -441,6 +449,7 @@ index 0000000..eb89c23
 +			if (p & 0x0004) {        /* Bit 2: DAT Line Active */
 +				ss.last_pres = p;
 +				error = ETIMEDOUT;
++				ss.data_fail = "xfer-active";
 +				sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +				printf("SARGO SDHCI: CMD%u: transfer still active, aborting\n", idx);
 +				goto out;
@@ -701,7 +710,11 @@ index 0000000..eb89c23
 +	 * FIFO is returning nothing. */
 +	error = sdhci_read_block(0);
 +	if (error) {
-+		panic("SARGO SDHCI: LBA 0 read failed error %d", error);
++		panic("SARGO: LBA 0 read failed error %d (%s)\n"
++		      "pres 0x%08x dcnt %u fcnt %u",
++		      error, ss.data_fail ? ss.data_fail : "?",
++		      sdhci_rd32(REG_PRESENT_STATE),
++		      sdhci_rd32(0x35c) & 0xffff, sdhci_rd32(0x308) & 0xffff);
 +	}
 +	mbr_sig = *(const uint16_t *)&b[510];
 +	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
