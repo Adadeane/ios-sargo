@@ -25,7 +25,7 @@ if command -v lz4 >/dev/null 2>&1; then
 	lz4 -f -q -9 out/Image out/Image.lz4
 else
 	# lz4 binary missing (e.g. after a VM redeploy): python lz4.frame makes the same frame format
-	python3 -c "import lz4.frame; d=open('out/Image','rb').read(); open('out/Image.lz4','wb').write(lz4.frame.compress(d, compression_level=9))"
+	python3 -c "import lz4.frame; d=open('out/Image','rb').read(); open('out/Image.lz4','wb').write(lz4.frame.compress(d, compression_level=9, block_size=lz4.frame.BLOCKSIZE_MAX256KB, block_linked=False, content_checksum=True, store_size=False))"
 fi
 # Ramdisk: an xnu payload (tools/mkpayload.py) if given as $1, else an empty
 # newc cpio (ABL dislikes a zero-size ramdisk on some builds) -> diagnostics.
