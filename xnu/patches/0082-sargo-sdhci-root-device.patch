@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,763 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -106,6 +106,7 @@ index 0000000..eb89c23
 +#define REG_POWER_CONTROL   0x29
 +#define REG_CLOCK_CONTROL   0x2c
 +#define REG_TIMEOUT_CONTROL 0x2e
++#define REG_SOFTWARE_RESET  0x2f
 +#define REG_INT_STATUS      0x30    /* normal (low 16) + error (high 16) */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
@@ -142,6 +143,7 @@ index 0000000..eb89c23
 +	bool ready;
 +	const char *fail;                       /* diagnostic: last init step reached */
 +	uint32_t caps, present;                 /* diagnostic: controller state at init */
++	uint16_t clkctl;                        /* diagnostic: clock control after set_clock */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -393,6 +395,23 @@ index 0000000..eb89c23
 +	    caps, sdhci_rd16(REG_CLOCK_CONTROL), sdhci_rd8(REG_POWER_CONTROL),
 +	    sdhci_rd8(REG_HOST_CONTROL), sdhci_rd16(REG_HOST_CONTROL2), present);
 +
++	/* Software reset: ABL leaves the controller mid-transfer (present
++	 * showed transfer-active and buffer bits all set), so CMD0 never
++	 * completes without one. Reset all, wait for the bit to clear. */
++	ss.fail = "reset";
++	sdhci_wr8(REG_SOFTWARE_RESET, 0x01);
++	{
++		int i;
++		for (i = 0; i < 10000; i++) {
++			if ((sdhci_rd8(REG_SOFTWARE_RESET) & 0x01) == 0) {
++				break;
++			}
++			delay(10);
++		}
++	}
++	printf("SARGO SDHCI: after reset present 0x%08x clkctl 0x%04x\n",
++	    sdhci_rd32(REG_PRESENT_STATE), sdhci_rd16(REG_CLOCK_CONTROL));
++
 +	/* 1-bit bus: the card reverts to 1-bit on CMD0, so the host must agree. */
 +	sdhci_wr8(REG_HOST_CONTROL, 0x00);
 +	/* Longest data timeout. */
@@ -401,6 +420,7 @@ index 0000000..eb89c23
 +
 +	/* 400 kHz identification clock (left alone if the base clock is unusable). */
 +	sdhci_set_clock(400000);
++	ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
 +
 +	/* CMD0: reset the card to idle. No response. */
 +	ss.fail = "CMD0";
@@ -777,8 +797,8 @@ index 0000000..eb89c23
 +			 * framebuffer. Panic with the exact step so the
 +			 * screen shows where it stopped. Remove once the
 +			 * init failure is understood. */
-+			panic("SARGO SDHCI: init failed at %s, error %d, caps 0x%08x present 0x%08x",
-+			    ss.fail ? ss.fail : "?", error, ss.caps, ss.present);
++			panic("SARGO SDHCI: init failed at %s, error %d, caps 0x%08x present 0x%08x clkctl 0x%04x",
++			    ss.fail ? ss.fail : "?", error, ss.caps, ss.present, ss.clkctl);
 +		}
 +	}
 +	*dev = ss.bdev;
