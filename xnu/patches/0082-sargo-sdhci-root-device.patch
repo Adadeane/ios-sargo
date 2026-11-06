@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,812 @@
+@@ -0,0 +1,814 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -112,6 +112,14 @@ index 0000000..eb89c23
 +#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
++#define REG_CORE_VENDOR_SPEC 0x20c
++
++/* CQHCI block (separate mapping at 0x7c5000). */
++#define CQHCI_CFG           0x08
++#define CQHCI_ENABLE        0x01
++#define CORE_CLK_PWRSAVE    (1u << 1)
++#define CORE_HC_MCLK_SEL_DFLT (2u << 8)
++#define CORE_HC_MCLK_SEL_MASK (3u << 8)
 +
 +/* Normal interrupt status bits. */
 +#define INT_CMD_COMPLETE    0x0001
@@ -784,12 +792,6 @@ index 0000000..eb89c23
 +#define SARGO_SDHCI_SIZE	0x1000u
 +#define SARGO_CQHCI_BASE	0x7c5000u
 +#define SARGO_CQHCI_SIZE	0x1000u
-+#define CQHCI_CFG		0x08
-+#define CQHCI_ENABLE		0x01
-+#define REG_CORE_VENDOR_SPEC	0x20c
-+#define CORE_CLK_PWRSAVE	(1u << 1)
-+#define CORE_HC_MCLK_SEL_DFLT	(2u << 8)
-+#define CORE_HC_MCLK_SEL_MASK	(3u << 8)
 +
 +static int
 +sargo_sdhci_init(void)
