@@ -17,11 +17,16 @@ $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -W
 	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
-size=$(aarch64-linux-gnu-nm out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
+size=$(aarch64-linux-gnu-nm out/shim.elf | awk '$3=="_end"{print $1}' | while read hex; do echo $((16#$hex)); done)
 truncate -s "$size" out/Image
 # Google ABL rejects a raw Image ("Unsupported"): ship it as an LZ4 frame
 # like stock (sunfish does the same).
-lz4 -f -q -9 out/Image out/Image.lz4
+if command -v lz4 >/dev/null 2>&1; then
+	lz4 -f -q -9 out/Image out/Image.lz4
+else
+	# lz4 binary missing (e.g. after a VM redeploy): python lz4.frame makes the same frame format
+	python3 -c "import lz4.frame; d=open('out/Image','rb').read(); open('out/Image.lz4','wb').write(lz4.frame.compress(d, compression_level=9))"
+fi
 # Ramdisk: an xnu payload (tools/mkpayload.py) if given as $1, else an empty
 # newc cpio (ABL dislikes a zero-size ramdisk on some builds) -> diagnostics.
 if [ -n "${1:-}" ]; then
