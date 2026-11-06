@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,774 @@
+@@ -0,0 +1,758 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -393,35 +393,19 @@ index 0000000..eb89c23
 +	present = sdhci_rd32(REG_PRESENT_STATE);
 +	ss.caps = caps;
 +	ss.present = present;
++	/* Capture ABL's clock as-is: builds with a reset + set_clock all
++	 * still timed out at CMD0, so this build leaves the clock exactly
++	 * as ABL left it (ABL reads this eMMC, so its clock works). */
++	ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
 +	printf("SARGO SDHCI: caps 0x%08x clkctl 0x%04x pwr 0x%02x hostctl 0x%02x hostctl2 0x%04x present 0x%08x\n",
 +	    caps, sdhci_rd16(REG_CLOCK_CONTROL), sdhci_rd8(REG_POWER_CONTROL),
 +	    sdhci_rd8(REG_HOST_CONTROL), sdhci_rd16(REG_HOST_CONTROL2), present);
 +
-+	/* Software reset: ABL leaves the controller mid-transfer (present
-+	 * showed transfer-active and buffer bits all set), so CMD0 never
-+	 * completes without one. Reset all, wait for the bit to clear. */
-+	ss.fail = "reset";
-+	sdhci_wr8(REG_SOFTWARE_RESET, 0x01);
-+	{
-+		int i;
-+		for (i = 0; i < 10000; i++) {
-+			if ((sdhci_rd8(REG_SOFTWARE_RESET) & 0x01) == 0) {
-+				break;
-+			}
-+			delay(10);
-+		}
-+	}
-+	printf("SARGO SDHCI: after reset present 0x%08x clkctl 0x%04x\n",
-+	    sdhci_rd32(REG_PRESENT_STATE), sdhci_rd16(REG_CLOCK_CONTROL));
-+
 +	/* Enable the interrupt status bits we poll. The SDHCI spec gates
-+	 * the status bits on this register: with it at 0 (reset state, or
-+	 * however ABL left it) INT_CMD_COMPLETE never latches and every
-+	 * command times out. This is the CMD0 timeout. */
++	 * the status bits on this register: with it at 0 INT_CMD_COMPLETE
++	 * never latches and every command times out. */
 +	sdhci_wr32(REG_INT_STATUS_EN, 0xffffffffu);
 +	sdhci_wr32(REG_INT_SIGNAL_EN, 0xffffffffu);
-+	printf("SARGO SDHCI: int status enable 0x%08x\n",
-+	    sdhci_rd32(REG_INT_STATUS_EN));
 +
 +	/* 1-bit bus: the card reverts to 1-bit on CMD0, so the host must agree. */
 +	sdhci_wr8(REG_HOST_CONTROL, 0x00);
@@ -429,9 +413,9 @@ index 0000000..eb89c23
 +	sdhci_wr8(REG_TIMEOUT_CONTROL, 0x0e);
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);
 +
-+	/* 400 kHz identification clock (left alone if the base clock is unusable). */
-+	sdhci_set_clock(400000);
-+	ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
++	/* Clock: deliberately NOT touched. ABL reads this eMMC, so its
++	 * clock works; every build that rewrote it still timed out at
++	 * CMD0. Leave it exactly as ABL left it. */
 +
 +	/* CMD0: reset the card to idle. No response. */
 +	ss.fail = "CMD0";
