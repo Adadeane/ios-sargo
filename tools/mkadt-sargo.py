@@ -223,6 +223,10 @@ def build(seed=None, qemu=False, highmem=False):
         ph(),
         ('compatible', cstr('sargo,sdhci')),
         ('reg', u64(SDHCI, SDHCI_SIZE)),
+        # status disabled: IOKit must NOT instantiate this as a device
+        # (it hangs matching it); the BSD driver finds it by NAME and
+        # reads reg directly, ignoring status.
+        ('status', cstr('disabled')),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
