@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1008 @@
+@@ -0,0 +1,1009 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -738,9 +738,10 @@ index 0000000..eb89c23
 +	error = sdhci_read_block(0);
 +	if (error) {
 +		panic("SARGO: LBA 0 read failed error %d (%s)\n"
-+		      "pres 0x%08x dcnt %u fcnt %u",
++		      "pres 0x%08x dcnt %u fcnt %u b0 0x%08x sig 0x%04x",
 +		      error, ss.data_fail ? ss.data_fail : "?",
-+		      ss.last_pres, ss.last_dcnt, ss.last_fcnt);
++		      ss.last_pres, ss.last_dcnt, ss.last_fcnt,
++		      ss.bounce[0], *(const uint16_t *)&b[510]);
 +	}
 +	mbr_sig = *(const uint16_t *)&b[510];
 +	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
