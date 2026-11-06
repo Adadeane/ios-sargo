@@ -339,11 +339,6 @@ index 0000000..eb89c23
 +		ss.last_resp0 = resp[0];
 +	}
 +
-+	/* W1C: acknowledge command-complete now that the response is
-+	 * latched, so the status bits do not stay stuck for the data
-+	 * phase. */
-+	sdhci_wr16(REG_INT_STATUS, 0x0001);
-+
 +	/* R1 error flags. R3 (CMD1) and R6 (CMD3) carry no R1 error bits. */
 +	if (resp && ((flags & 0x03) == CMD_RESP_SHORT ||
 +	    (flags & 0x03) == CMD_RESP_SHORT_BUSY) &&
@@ -356,6 +351,11 @@ index 0000000..eb89c23
 +	if (!data) {
 +		goto out;
 +	}
++
++	/* W1C: clear command-complete so the buffer-ready poll starts
++	 * from a clean status. Data commands only; control commands
++	 * already clear the whole status at entry and exit. */
++	sdhci_wr16(REG_INT_STATUS, 0x0001);
 +
 +	/* Wait for the data buffer to fill, read it, wait for transfer complete. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
@@ -508,12 +508,12 @@ index 0000000..eb89c23
 +	ss.fail = "power";
 +	sdhci_wr8(REG_POWER_CONTROL, 0x0f);              /* power on, 3.3V */
 +	ss.fail = "clock";
-+	/* Clock: 400 kHz for Identification Mode (CMD0-CMD3). Build 7 ran
++	/* Clock: 384 kHz for Identification Mode (CMD0-CMD3). Build 7 ran
 +	 * the SD clock at the raw 192 MHz base (divider 0, clkctl 0x0007):
 +	 * in open-drain identification mode the card's pull-up RC rise
 +	 * time is ~150-300 ns, so a 136-bit response clocked at 5.2 ns
 +	 * per cycle is unreadable. CMD0/CMD1 survived, CMD2 did not.
-+	 * Divider N = 240 (0xF0): 192 MHz / (2 * 240) = 400 kHz.
++	 * Divider N = 250 (0xFA): 192 MHz / (2 * 250) = 384 kHz.
 +	 * Standard sequence: stop the clock, write divider + internal
 +	 * clock enable, poll for internal clock stable, enable SD clock.
 +	 * The divider failed in builds 2-5 only because CQHCI was still
@@ -524,7 +524,7 @@ index 0000000..eb89c23
 +		uint64_t clk_deadline;
 +		sdhci_wr16(REG_CLOCK_CONTROL, 0x0000);       /* stop SD clock */
 +		delay(100);                                 /* 100 us */
-+		clk_val = (0xF0 << 8) | 0x0001;              /* divider 240 + internal clock enable */
++		clk_val = (0xFA << 8) | 0x0001;              /* divider 250 + internal clock enable */
 +		sdhci_wr16(REG_CLOCK_CONTROL, clk_val);
 +		nanoseconds_to_absolutetime(20000000ULL, &clk_deadline);
 +		clk_deadline += mach_absolute_time();
@@ -571,7 +571,7 @@ index 0000000..eb89c23
 +		}
 +		printf("SARGO SDHCI: CMD1 ready, ocr 0x%08x\n", resp[0]);
 +	}
-+	delay(10000);                                   /* 10 ms: let the card settle from Init to Ready before CMD2 */
++	delay(50000);                                   /* 50 ms: let the card settle from Init to Ready before CMD2 */
 +
 +	/* CMD2: CID (136-bit). Retry, then fall back to no CRC check
 +	 * (Qualcomm R2 CRC quirk). */
