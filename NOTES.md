@@ -1,91 +1,64 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ZONE_INIT STALL IS THE REAL BLOCKER, 2026-11-06 15:30 (Pepper, read first) <<<
+## >>> CURRENT BLOCKER: SDHCI CMD0 TIMEOUT, 2026-11-06 18:47 (Pepper, read first) <<<
 
-**The problem was never storage. The kernel stalls in early VM setup on
-the phone, before it ever reaches root mounting.** Everything below is
-proven by boot tests on 2026-11-06. The SDHCI driver (patch 0082) is
-written, verified in the kernel, and irrelevant until this stall is fixed.
+**CORRECTION — the zone_init stall below is SUPERSEDED and wrong.** The kernel
+was never stalling in zone_init. Antigravity (relayed by Adam 16:05-16:08)
+found the real hang: `kernel_bootstrap_thread` -> `kperf_init_early()` ->
+`ml_wait_max_cpus()` spins forever, because SweetCPU (patch 0018) matches
+ONLY `IONameMatch 'qcom,kryo470'` while the sargo ADT declared CPUs as
+`qcom,kryo360`. SweetCPU never matched cpu0, `ml_set_max_cpus()` was never
+called, `ml_wait_max_cpus()` never returned. The zone_init lines only looked
+like the stall point because fbcon (1080x2220, 69 rows) wraps to row 0
+instead of scrolling. **Fix (commit 4772f92):** mkadt-sargo.py CPU
+compatible is now `qcom,kryo360` + `qcom,kryo470` + `ARM,v8`. **Proof boot
+16:11:** "SWEET CPU: boot CPU 0 registered" then the deliberate panic
+"SARGO SDHCI rootdev called" fired for the first time. The driver IS
+called; root mounting IS reached.
 
-**What the stall looks like:** every boot prints the full early log
-(platform expert, AKS, WDT, HID, battery, FB 1080x2220) then stops after
-the `zone_init` map lines (VM/RO/GEN0/GEN1/GEN2/GEN3/DATA) and
-"vm_compressor_mode is 4". No panic, no further output, no lock screen.
-The kernel works in QEMU (same kernel boots past this point) but hangs
-here on the phone hardware.
+**Current blocker (2026-11-06 18:47): the SDHCI driver runs but CMD0 never
+completes.** The kernel reaches IOFindBSDRoot, calls sargo_sdhci_init, and
+the first command times out (error 60 = ETIMEDOUT, no error bits set).
+Four Codemagic builds failed identically at CMD0. Antigravity (18:47)
+isolated the mechanism: CMD0 is a 48-bit broadcast with no response; the
+controller must shift 48 clock pulses out on SDCLK before INT_CMD_COMPLETE
+asserts. No completion + no error = SDCLK is not pulsing. Causes: ABL
+leaves clkctl 0x0003 (internal clock on/stable, SD clock OFF); CQHCI at
+0x7c5000 left enabled by ABL owns the command state machine; vendor
+register CORE_VENDOR_SPEC 0x20c has clock power-save on; bus power never
+turned on; and the Qualcomm divider encoding breaks the clock line.
+**Fix pushed (commit f74b7a9):** disable CQHCI, clear power-save + select
+default master clock at 0x20c, power the bus 3.3V, set only bit 2 (SD clock
+enable) on ABL's existing clkctl + 1 ms delay. No reset, no set_clock.
+Codemagic build 6aee20f2a44ad9d77c48e256 started via the API 18:47.
+Handoff: `~/workspace/goals/ios-16-on-pixel-3a-sargo-via-ios-sweet/files/antigravity-handoff-2026-11-06-sdhci.md`.
 
-**Proven NOT the cause (each ruled out by a boot test):**
-- SDHCI driver / IOFindBSDRoot hook: panic-as-test (commit 100c4b4, CI
-  42191251201) puts `panic("SARGO SDHCI rootdev called")` at the start
-  of `sargo_sdhci_rootdev`. Booted 15:10, NO panic, same stall. The
-  driver is never called. The stall is upstream of the hook.
-- UFS driver probe: withdrawn 09:10. Patch 0028 gates `sweet_ufs_rootdev`
-  on `rd=ufsroot0`; sargo boots `rd=sdhciroot0`, so it never runs. Even
-  if called it returns ENXIO (no /sweet-ufs node in the ADT) before any
-  register access. And the stall is before root mounting runs at all.
-- ADT: original ADT (extracted from the first-boot payload, SHA256
-  07fb72e4...) vs current ADT (SHA256 3856f814...) are byte-identical
-  except /chosen/random-seed (random per build). ADT is not the cause.
-- Highmem: phone ADT rebuilt WITHOUT --highmem (dram-base 0xb0000000,
-  dram-size 0x4f000000, low bank where the kernel lives, instead of
-  0x100000000 / 0x7e1c0000). Booted 15:28, same stall. Highmem is not
-  the cause.
-- macOS 14 vs 15 builds: the old macos-14 kernel (42059839759) rebuilt
-  into a fresh shim boots 15:18 and stalls identically. The build
-  environment is not the cause.
-- LZ4 CLI vs Python: lz4 1.9.4 installed, shim rebuilt with the CLI —
-  byte-identical to the Python-fallback build (SHA256 70936fc6... both).
-  Not the cause.
-- Printfs in the driver: adding 3 early printfs (commit 518fb0f, CI
-  42150945009) causes an EARLY panic (red screen, "SWEET EARLY PANIC:
-  chine_task.c" after parse_cpu_topology) on 2/2 boots. Removing them
-  (commit 37d71e7, CI 42189379010) restores the zone_init stall. The
-  mechanism is unknown (binary layout fragility or a bad build). Do NOT
-  add printfs to the driver to debug this — use the panic-as-test
-  pattern instead (a single panic() at a function entry, which the
-  compiler may optimise around but still proves whether the function
-  runs).
+**Builder:** Codemagic is now the working builder (app
+6aee05d9053b8e262b6c8636, workflow xnu-sargo, branch sargo, free 500
+min/month). API token connected as custom.codemagic; helper
+`~/workspace/custom-connectors/custom.codemagic/bin/cm-api` lists/starts
+builds and downloads artifacts. GitHub Actions is unreliable right now
+(runs 42250632251, 42253103401 cancelled in queue, zero steps; run
+42267630491 still queued). Kernel build ~8 min on Codemagic.
 
-**Patch-skip root cause (found 02:14, fixed in f59537b):** blacktop's
-build.sh runs `git apply --check` per patch and SILENTLY SKIPS failures
-(warning only). Patch 0082's `bsd/conf/files` hunk inserted
-`sargo_sdhci.c` after `sweet_ufs.c`, but patches 0054/0060/0062/0072 had
-already added six files between them — context mismatch, whole patch
-skipped. CI runs 42139801451 and 42147766929 were "SUCCESS" with NO
-driver in the kernel. Fixed by inserting after `sweet_usb.c` with
-post-0072 context. **Always `strings`-check the kernel binary for the
-feature before booting.** CI log check: the printf build (42150945009)
-and the clean revert (42189379010) skipped the exact same four upstream
-dxb patches, no sweet/sargo patch skipped in either, so the silent-skip
-did NOT recur after the fix.
-
-**First-boot caveat:** the 5 Nov 22:41 "first boot" was recorded as
-working (full log, idling on rd=md0). The photo is not saved, and the
-records do not confirm any log line past zone_init. The byte-identical
-rebuild of that image now stalls at zone_init. The first boot was most
-likely misread — it probably stalled here too. Do not treat it as proof
-the kernel once booted past this point on the phone.
-
-**Current state (2026-11-06 15:30):**
-- Kernel 42189379010 (driver in, no printfs) and 42191251201 (panic
-  test) both verified in their binaries; panic-test image staged on
-  Oracle ~/boot-test/, phone left stalled on the no-highmem test kernel.
+**Current state (2026-11-06 18:47):**
+- Kernel: Codemagic build 6 (commit 110b564) verified and booted; build 7
+  (commit f74b7a9, Antigravity fix) building.
 - Userdata holds the real iOS 16 root image (flashed 00:26, 6 Nov).
   Android userdata is gone (authorised). All other partitions backed
   up (71 on phone, 67 smalls + 4 big on USB stick, 12 critical on VM).
 - Phone boots only via `fastboot boot` (temporary images). After a
-  stall/panic the phone may land in fastbootd (userspace) where
-  `fastboot boot` fails "Unrecognized command boot" — fix with
-  `fastboot reboot bootloader` first.
+  panic the phone may land in fastbootd — fix with `fastboot reboot
+  bootloader` first.
 - Boot boundary (Adam): no boot without his explicit go-ahead.
+- The Oracle→laptop hop boot step got safety-flagged 17:57; Adam boots
+  the images himself with `fastboot boot <path>` on the laptop.
 
-**Next:** find what the kernel does immediately after the zone_init map
-lines and why it hangs there on the SDM670. Candidates: timer/GIC
-interrupt setup (kernel waiting for a tick that never comes), VM/page
-table setup for the dram range, or a spinlock. The sweet kernel boots
-on the Redmi with the same pattern, so the difference is sargo-specific
-(SDM670, its GIC/timer, or its memory map). Antigravity review requested
-2026-11-06 — see the handoff doc for the full picture.
+**Next:** boot build 7 (f74b7a9). If CMD0 completes, watch CMD1/CMD2/CMD3/
+CMD9/CMD7/CMD16 and the GPT scan; if root mounts, iOS boots toward the
+lock screen (PIO reads ~30-40 KB/s, slow first boot). If it still fails
+at CMD0, the panic line names the step (cqhci/vendor/power/clock) and
+the clkctl value after the enable.
 
 ## >>> SARGO SDHCI DRIVER, 2026-11-06 ~00:40 (Pepper, read first) <<<
 
