@@ -40,7 +40,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,723 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -702,24 +702,23 @@ index 0000000..eb89c23
 +	.d_type       = D_DISK,
 +};
 +
++/* Fixed SDHCI host base (live FDT sdhci@7c4000). The address is a
++ * hardware constant, so it is hardcoded: a /sargo-sdhci DT node stalls
++ * early boot (the kernel touches the node's reg region before this
++ * driver runs, and the SDHCI clock is gated after ABL hands off, so
++ * the access hangs). No DT node for it, no lookup here. */
++#define SARGO_SDHCI_BASE	0x7c4000u
++#define SARGO_SDHCI_SIZE	0x1000u
++
 +static int
 +sargo_sdhci_init(void)
 +{
-+	DTEntry node;
-+	uintptr_t const *reg = NULL;
-+	unsigned int size = 0;
 +	char want[64] = "userdata";
 +	int error;
 +
-+	if (SecureDTLookupEntry(NULL, "/sargo-sdhci", &node) != kSuccess ||
-+	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
-+	    size < 2 * sizeof(uintptr_t)) {
-+		printf("SARGO SDHCI: no /sargo-sdhci node in the device tree\n");
-+		return ENXIO;
-+	}
 +	PE_parse_boot_argn("sdhciroot", want, sizeof(want));
 +
-+	ss.regs = ml_io_map(reg[0], reg[1]);
++	ss.regs = ml_io_map(SARGO_SDHCI_BASE, SARGO_SDHCI_SIZE);
 +	ss.secsize = DEV_BSIZE;
 +
 +	lck_mtx_lock(&sargo_sdhci_lock);
