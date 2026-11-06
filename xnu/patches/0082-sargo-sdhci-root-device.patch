@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,982 @@
+@@ -0,0 +1,1001 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -323,8 +323,12 @@ index 0000000..eb89c23
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
++	/* Transfer Mode 0x12: Read + Block Count Enable. On SDCC the
++	 * controller needs the block count to close a single-block
++	 * transfer and assert transfer-complete; with 0x10 it leaves
++	 * DAT Line Active asserted (fix 11). */
 +	sdhci_wr32(REG_TRANSFER_MODE,
-+	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x10u : 0x00u));
++	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x12u : 0x00u));
 +	__builtin_arm_dsb(0xf);
 +
 +	/* Wait for command complete or an error. */
@@ -683,6 +687,21 @@ index 0000000..eb89c23
 +		return error;
 +	}
 +	delay(5000);                                    /* 5 ms: let the card settle into TRAN */
++
++	/* CMD6: SWITCH EXT_CSD[183] (BUS_WIDTH) to 0 (1-bit SDR).
++	 * ABL leaves the card in 8-bit mode; CMD0 does NOT reset
++	 * EXT_CSD on a warm boot (power rails stay up). The card
++	 * then sends CMD17 data across DAT[7:0] while the host
++	 * listens only on DAT0, so no data ever arrives. Force the
++	 * card to agree with REG_HOST_CONTROL 0x00 (1-bit). */
++	ss.fail = "CMD6";
++	error = sdhci_cmd(6, 0x03B70000u,
++	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++	if (error) {
++		printf("SARGO SDHCI: CMD6 switch to 1-bit bus failed: %d\n", error);
++		return error;
++	}
++	delay(5000);                                    /* 5 ms settle after bus switch */
 +
 +	/* CMD16: 512-byte blocks. */
 +	ss.fail = "CMD16";
