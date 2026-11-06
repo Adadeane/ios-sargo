@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,723 @@
+@@ -0,0 +1,743 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -140,6 +140,8 @@ index 0000000..eb89c23
 +	int bmajor, cmajor;
 +	dev_t bdev;
 +	bool ready;
++	const char *fail;                       /* diagnostic: last init step reached */
++	uint32_t caps, present;                 /* diagnostic: controller state at init */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -382,8 +384,11 @@ index 0000000..eb89c23
 +
 +	/* Log the state ABL left behind; the first boot log is the only
 +	 * way to learn it. */
++	ss.fail = "caps";
 +	caps = sdhci_rd32(REG_CAPABILITIES);
 +	present = sdhci_rd32(REG_PRESENT_STATE);
++	ss.caps = caps;
++	ss.present = present;
 +	printf("SARGO SDHCI: caps 0x%08x clkctl 0x%04x pwr 0x%02x hostctl 0x%02x hostctl2 0x%04x present 0x%08x\n",
 +	    caps, sdhci_rd16(REG_CLOCK_CONTROL), sdhci_rd8(REG_POWER_CONTROL),
 +	    sdhci_rd8(REG_HOST_CONTROL), sdhci_rd16(REG_HOST_CONTROL2), present);
@@ -398,6 +403,7 @@ index 0000000..eb89c23
 +	sdhci_set_clock(400000);
 +
 +	/* CMD0: reset the card to idle. No response. */
++	ss.fail = "CMD0";
 +	error = sdhci_cmd(0, 0, CMD_RESP_NONE, 0, NULL);
 +	if (error) {
 +		return error;
@@ -405,6 +411,7 @@ index 0000000..eb89c23
 +	delay(1000);                                    /* 1 ms */
 +
 +	/* CMD1: poll the OCR until the card is ready (busy bit set). */
++	ss.fail = "CMD1";
 +	{
 +		uint64_t deadline;
 +		nanoseconds_to_absolutetime(INIT_TIMEOUT_NS, &deadline);
@@ -428,6 +435,7 @@ index 0000000..eb89c23
 +	}
 +
 +	/* CMD2: CID (136-bit). */
++	ss.fail = "CMD2";
 +	error = sdhci_cmd(2, 0, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
 +	if (error) {
 +		return error;
@@ -435,6 +443,7 @@ index 0000000..eb89c23
 +	printf("SARGO SDHCI: CID %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
 +
 +	/* CMD3: assign RCA 2. */
++	ss.fail = "CMD3";
 +	error = sdhci_cmd(3, 0x00020000u,
 +	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
@@ -447,6 +456,7 @@ index 0000000..eb89c23
 +	}
 +
 +	/* CMD9: CSD (136-bit). */
++	ss.fail = "CMD9";
 +	error = sdhci_cmd(9, (uint32_t)ss.rca << 16, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
 +	if (error) {
 +		return error;
@@ -454,6 +464,7 @@ index 0000000..eb89c23
 +	printf("SARGO SDHCI: CSD %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
 +
 +	/* CMD7: select the card (TRAN state). */
++	ss.fail = "CMD7";
 +	error = sdhci_cmd(7, (uint32_t)ss.rca << 16,
 +	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
@@ -461,6 +472,7 @@ index 0000000..eb89c23
 +	}
 +
 +	/* CMD16: 512-byte blocks. */
++	ss.fail = "CMD16";
 +	error = sdhci_cmd(16, 512,
 +	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
@@ -725,6 +737,7 @@ index 0000000..eb89c23
 +	lck_mtx_lock(&sargo_sdhci_lock);
 +	error = sdhci_init_card();
 +	if (!error) {
++		ss.fail = "GPT";
 +		error = sdhci_find_partition(want);
 +	}
 +	lck_mtx_unlock(&sargo_sdhci_lock);
@@ -758,7 +771,14 @@ index 0000000..eb89c23
 +	if (!ss.ready) {
 +		int error = sargo_sdhci_init();
 +		if (error) {
-+			return error;
++			/* Diagnostic panic (2026-11-06): the first real boot
++			 * failed here with error 60 (ETIMEDOUT) and the
++			 * driver's printf lines had scrolled off the
++			 * framebuffer. Panic with the exact step so the
++			 * screen shows where it stopped. Remove once the
++			 * init failure is understood. */
++			panic("SARGO SDHCI: init failed at %s, error %d, caps 0x%08x present 0x%08x",
++			    ss.fail ? ss.fail : "?", error, ss.caps, ss.present);
 +		}
 +	}
 +	*dev = ss.bdev;
