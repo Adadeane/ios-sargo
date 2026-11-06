@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,925 @@
+@@ -0,0 +1,936 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -295,16 +295,19 @@ index 0000000..eb89c23
 +
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +
++	/* Block Size (0x04) and Block Count (0x06) form a single 32-bit
++	 * register; Transfer Mode (0x0c) and Command (0x0e) form another.
++	 * On the Qualcomm 32-bit AHB bus, separate 16-bit writes to the
++	 * two halves can wipe the other half back to 0, so both pairs
++	 * must be written as single atomic 32-bit dwords. A 16-bit store
++	 * to Block Count wiped Block Size to 0 (build 13: buffer-ready
++	 * fired for a 0-byte transfer, FIFO read zeros). */
 +	if (data) {
-+		sdhci_wr16(REG_BLOCK_SIZE, SDHCI_BLOCK);
-+		sdhci_wr16(REG_BLOCK_COUNT, 1);
-+		/* Read direction, single block, PIO. Block Count Enable must
-+		 * be 0 for single-block transfers (SDHCI spec 2.2.5); with
-+		 * it set, SDCC never asserts transfer-complete. */
-+		sdhci_wr16(REG_TRANSFER_MODE, 0x10);
++		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
 +	sdhci_wr32(REG_ARGUMENT, arg);
-+	sdhci_wr16(REG_COMMAND, ((uint16_t)idx << 8) | flags);
++	sdhci_wr32(REG_TRANSFER_MODE,
++	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x10u : 0x00u));
 +	__builtin_arm_dsb(0xf);
 +
 +	/* Wait for command complete or an error. */
@@ -362,9 +365,13 @@ index 0000000..eb89c23
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		if (nint & INT_BUF_READ_READY) {
++		/* Require both the interrupt bit and the live Buffer Read
++		 * Enable (PRESENT_STATE bit 11). The interrupt can be
++		 * latched while the FIFO is actually empty (build 13). */
++		if ((nint & INT_BUF_READ_READY) && (present & 0x0800)) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -667,7 +674,11 @@ index 0000000..eb89c23
 +	mbr_sig = *(const uint16_t *)&b[510];
 +	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
 +	if (mbr_sig != 0xaa55) {
-+		panic("SARGO SDHCI: LBA 0 bad MBR sig 0x%04x b0 0x%08x", mbr_sig, ss.bounce[0]);
++		panic("SARGO SDHCI: LBA 0 b0 0x%08x sig 0x%04x blk 0x%08x xfer 0x%08x pres 0x%08x fcnt 0x%04x dcnt 0x%04x",
++		      ss.bounce[0], mbr_sig,
++		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE),
++		      sdhci_rd32(REG_PRESENT_STATE),
++		      sdhci_rd32(0x308) & 0xffff, sdhci_rd32(0x35c) & 0xffff);
 +	}
 +
 +	error = sdhci_read_block(1);
