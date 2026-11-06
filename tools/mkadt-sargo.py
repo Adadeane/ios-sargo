@@ -214,10 +214,14 @@ def build(seed=None, qemu=False, highmem=False):
     ])
 
     # bsd/dev/sargo_sdhci.c: the eMMC SDHCI host ABL leaves running
+    # NOTE: compatible is sargo,sdhci (NOT qcom,sdhci-msm-v5): the qcom string
+    # matched an IOKit driver that hung during device matching and stalled
+    # the boot. The BSD driver looks the node up by NAME (/sargo-sdhci),
+    # so the compatible string does not matter to it.
     # (absolute physical reg). Omitted in --qemu, like sweet's UFS node.
     sdhci = node('sargo-sdhci', [
         ph(),
-        ('compatible', cstr('qcom,sdhci-msm-v5')),
+        ('compatible', cstr('sargo,sdhci')),
         ('reg', u64(SDHCI, SDHCI_SIZE)),
     ])
 
