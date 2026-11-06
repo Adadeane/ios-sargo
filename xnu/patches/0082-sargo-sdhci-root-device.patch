@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,812 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -137,6 +137,7 @@ index 0000000..eb89c23
 +
 +static struct {
 +	vm_offset_t regs;
++	vm_offset_t cq_regs;                    /* CQHCI block at 0x7c5000 */
 +	uint16_t rca;
 +	uint64_t first_block, nblocks;          /* partition, in 512-byte blocks */
 +	uint32_t secsize;                       /* logical sector size for the BSD layer */
@@ -416,6 +417,50 @@ index 0000000..eb89c23
 +	/* Clock: deliberately NOT touched. ABL reads this eMMC, so its
 +	 * clock works; every build that rewrote it still timed out at
 +	 * CMD0. Leave it exactly as ABL left it. */
++
++	/* Antigravity fix (2026-11-06): CMD0 never completes because
++	 * SDCLK is not pulsing. Four causes, all addressed here.
++	 * 1. CQHCI at 0x7c5000 is left enabled by ABL and takes over the
++	 *    command state machine, so standard REG_COMMAND writes are
++	 *    ignored. Halt and disable it.
++	 * 2. Qualcomm vendor register CORE_VENDOR_SPEC (0x20c) has clock
++	 *    power-save on (bit 1), which auto-gates SDCLK when idle, and
++	 *    the master clock select may sit in HS400 mode. Clear
++	 *    power-save, select the default master clock.
++	 * 3. Bus power was never turned on. Enable 3.3V.
++	 * 4. ABL leaves clkctl 0x0003: internal clock on and stable, SD
++	 *    clock disabled. Do NOT compute a divider (the Qualcomm
++	 *    divider encoding breaks the clock line). Just set bit 2 on
++	 *    ABL's existing clock and wait 1 ms. */
++	ss.fail = "cqhci";
++	if (ss.cq_regs) {
++		uint32_t cq_cfg = *(volatile uint32_t *)(ss.cq_regs + CQHCI_CFG);
++		if (cq_cfg & CQHCI_ENABLE) {
++			*(volatile uint32_t *)(ss.cq_regs + CQHCI_CFG) =
++			    cq_cfg & ~CQHCI_ENABLE;
++			printf("SARGO SDHCI: CQHCI disabled (was 0x%08x)\n", cq_cfg);
++		}
++	}
++	ss.fail = "vendor";
++	{
++		uint32_t vspec = sdhci_rd32(REG_CORE_VENDOR_SPEC);
++		vspec &= ~CORE_CLK_PWRSAVE;
++		vspec = (vspec & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT;
++		sdhci_wr32(REG_CORE_VENDOR_SPEC, vspec);
++		printf("SARGO SDHCI: vendor spec 0x%08x\n",
++		    sdhci_rd32(REG_CORE_VENDOR_SPEC));
++	}
++	ss.fail = "power";
++	sdhci_wr8(REG_POWER_CONTROL, 0x0f);              /* power on, 3.3V */
++	ss.fail = "clock";
++	{
++		uint16_t clk = sdhci_rd16(REG_CLOCK_CONTROL);
++		clk |= 0x0004;                               /* SD clock enable */
++		sdhci_wr16(REG_CLOCK_CONTROL, clk);
++		delay(1000);                                 /* 1 ms */
++		ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
++		printf("SARGO SDHCI: clkctl now 0x%04x\n", ss.clkctl);
++	}
 +
 +	/* CMD0: reset the card to idle. No response. */
 +	ss.fail = "CMD0";
@@ -737,6 +782,14 @@ index 0000000..eb89c23
 + * the access hangs). No DT node for it, no lookup here. */
 +#define SARGO_SDHCI_BASE	0x7c4000u
 +#define SARGO_SDHCI_SIZE	0x1000u
++#define SARGO_CQHCI_BASE	0x7c5000u
++#define SARGO_CQHCI_SIZE	0x1000u
++#define CQHCI_CFG		0x08
++#define CQHCI_ENABLE		0x01
++#define REG_CORE_VENDOR_SPEC	0x20c
++#define CORE_CLK_PWRSAVE	(1u << 1)
++#define CORE_HC_MCLK_SEL_DFLT	(2u << 8)
++#define CORE_HC_MCLK_SEL_MASK	(3u << 8)
 +
 +static int
 +sargo_sdhci_init(void)
@@ -747,6 +800,7 @@ index 0000000..eb89c23
 +	PE_parse_boot_argn("sdhciroot", want, sizeof(want));
 +
 +	ss.regs = ml_io_map(SARGO_SDHCI_BASE, SARGO_SDHCI_SIZE);
++	ss.cq_regs = ml_io_map(SARGO_CQHCI_BASE, SARGO_CQHCI_SIZE);
 +	ss.secsize = DEV_BSIZE;
 +
 +	lck_mtx_lock(&sargo_sdhci_lock);
