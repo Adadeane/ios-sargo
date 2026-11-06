@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,851 @@
+@@ -0,0 +1,866 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -156,6 +156,7 @@ index 0000000..eb89c23
 +	uint32_t caps, present;                 /* diagnostic: controller state at init */
 +	uint16_t clkctl;                        /* diagnostic: clock control after set_clock */
 +	uint16_t last_nint, last_eint;          /* diagnostic: last interrupt status seen */
++	uint32_t last_resp0;                    /* diagnostic: RESPONSE0 of the last command */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -307,6 +308,7 @@ index 0000000..eb89c23
 +		resp[1] = sdhci_rd32(REG_RESPONSE1);
 +		resp[2] = sdhci_rd32(REG_RESPONSE2);
 +		resp[3] = sdhci_rd32(REG_RESPONSE3);
++		ss.last_resp0 = resp[0];
 +	}
 +
 +	/* R1 error flags. R3 (CMD1) and R6 (CMD3) carry no R1 error bits. */
@@ -547,17 +549,29 @@ index 0000000..eb89c23
 +	}
 +	printf("SARGO SDHCI: CID %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
 +
-+	/* CMD3: assign RCA 2. */
++	/*
++	 * CMD3: assign RCA 2.
++	 * On eMMC (JESD84-B51 6.5.3), CMD3 is SET_RELATIVE_ADDR: the host
++	 * assigns the RCA via argument [31:16] and the card replies with
++	 * R1 (Device Status), NOT R6 (the SD RCA response). Bits 31:16
++	 * of R1 are error flags; 0 means no error. Build 8 panicked here
++	 * precisely because the card reported 100% success: the old code
++	 * read resp[0] >> 16 as the RCA and treated 0 as failure.
++	 */
 +	ss.fail = "CMD3";
-+	error = sdhci_cmd(3, 0x00020000u,
-+	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
-+	if (error) {
-+		return error;
-+	}
-+	ss.rca = (uint16_t)(resp[0] >> 16);
-+	printf("SARGO SDHCI: RCA %u\n", ss.rca);
-+	if (ss.rca == 0) {
-+		return EIO;
++	{
++		const uint16_t assigned_rca = 2;
++		error = sdhci_cmd(3, (uint32_t)assigned_rca << 16,
++		    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++		if (error) {
++			return error;
++		}
++		if (resp[0] & 0xFDF98000u) {
++			printf("SARGO SDHCI: CMD3 R1 device error flags: 0x%08x\n", resp[0]);
++			return EIO;
++		}
++		ss.rca = assigned_rca;
++		printf("SARGO SDHCI: assigned RCA %u (R1 status 0x%08x)\n", ss.rca, resp[0]);
 +	}
 +
 +	/* CMD9: CSD (136-bit). */
@@ -575,6 +589,7 @@ index 0000000..eb89c23
 +	if (error) {
 +		return error;
 +	}
++	delay(5000);                                    /* 5 ms: let the card settle into TRAN */
 +
 +	/* CMD16: 512-byte blocks. */
 +	ss.fail = "CMD16";
@@ -885,8 +900,8 @@ index 0000000..eb89c23
 +			 * framebuffer. Panic with the exact step so the
 +			 * screen shows where it stopped. Remove once the
 +			 * init failure is understood. */
-+			panic("SARGO SDHCI: init failed at %s, error %d, nint 0x%04x eint 0x%04x caps 0x%08x present 0x%08x clkctl 0x%04x",
-+			    ss.fail ? ss.fail : "?", error, ss.last_nint, ss.last_eint, ss.caps, ss.present, ss.clkctl);
++			panic("SARGO SDHCI: init failed at %s, error %d, resp0 0x%08x nint 0x%04x eint 0x%04x caps 0x%08x present 0x%08x clkctl 0x%04x",
++			    ss.fail ? ss.fail : "?", error, ss.last_resp0, ss.last_nint, ss.last_eint, ss.caps, ss.present, ss.clkctl);
 +		}
 +	}
 +	*dev = ss.bdev;
