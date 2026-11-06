@@ -1,0 +1,767 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/sargo_sdhci.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -782,6 +782,22 @@
+ 		*oflags = 0;
+ 		goto iofrootx;
+ 	}
++
++//
++//	SARGO: root on a GPT partition of the internal eMMC (bsd/dev/sargo_sdhci.c)
++//
++	if (strcmp(rdBootVar, "sdhciroot0") == 0) {
++		extern int sargo_sdhci_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int sdhci_error = sargo_sdhci_rootdev(root);
++		if (sdhci_error) {
++			panic("IOFindBSDRoot: SARGO SDHCI root %s unavailable: %d", rdBootVar, sdhci_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
+ #endif
+ 
+ //
+diff --git a/bsd/dev/sargo_sdhci.c b/bsd/dev/sargo_sdhci.c
+new file mode 100644
+index 0000000..eb89c23
+--- /dev/null
++++ b/bsd/dev/sargo_sdhci.c
+@@ -0,0 +1,724 @@
++/*
++ * SARGO internal eMMC root device (read-only, PIO).
++ *
++ * The Pixel 3a is eMMC 5.1, not UFS: the SDHCI host is sdhci@7c4000
++ * (compatible qcom,sdhci-msm-v5, regs 0x7c4000/0x1000 + 0x7c5000/0x1000
++ * cmdq, GIC_SPI 641/644, 8-bit bus, HS400/HS200/DDR). The bootloader
++ * chain (XBL -> ABL) reads from this eMMC, and fastboot reads partition
++ * info from it, so the host is left enabled with clocks and power on.
++ * This driver reuses that state: it does NOT reset the host (a reset
++ * would drop the power/clock setup ABL left behind), it only sets the
++ * bus to 1-bit, the clock to 400 kHz, and runs the standard eMMC init
++ * sequence (CMD0 -> CMD1 -> CMD2 -> CMD3 -> CMD9 -> CMD7 -> CMD16)
++ * before issuing polled CMD17 single-block reads through the SDHCI
++ * buffer port. It finds one GPT partition by name (boot-arg
++ * sdhciroot=, default "userdata") and exposes it as the BSD disk
++ * sdhciroot0 (rsdhciroot0), with 512-byte sectors. Root on it with
++ * rd=sdhciroot0.
++ *
++ * No DMA, no HS200/HS400, no writes. Data moves one 512-byte block at
++ * a time through a static bounce buffer and memcpy, so there are no
++ * DMA alignment or cache-coherency concerns. At 400 kHz PIO the
++ * throughput is ~30-40 KB/s: slow, but enough to mount the root and
++ * reach SpringBoard. Faster clocks are a later step.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/* SDHCI standard register offsets (SD Host Controller spec). */
++#define REG_DMA_ADDR        0x00
++#define REG_BLOCK_SIZE      0x04
++#define REG_BLOCK_COUNT     0x06
++#define REG_ARGUMENT        0x08
++#define REG_TRANSFER_MODE   0x0c
++#define REG_COMMAND         0x0e
++#define REG_RESPONSE0       0x10
++#define REG_RESPONSE1       0x14
++#define REG_RESPONSE2       0x18
++#define REG_RESPONSE3       0x1c
++#define REG_BUFFER          0x20
++#define REG_PRESENT_STATE   0x24
++#define REG_HOST_CONTROL    0x28
++#define REG_POWER_CONTROL   0x29
++#define REG_CLOCK_CONTROL   0x2c
++#define REG_TIMEOUT_CONTROL 0x2e
++#define REG_INT_STATUS      0x30    /* normal (low 16) + error (high 16) */
++#define REG_HOST_CONTROL2   0x3e
++#define REG_CAPABILITIES    0x40
++
++/* Normal interrupt status bits. */
++#define INT_CMD_COMPLETE    0x0001
++#define INT_XFER_COMPLETE   0x0002
++#define INT_BUF_READ_READY  0x0020
++#define INT_ERROR           0x8000
++/* Error interrupt status bits. */
++#define EINT_CMD_TIMEOUT    0x0001
++#define EINT_DATA_TIMEOUT   0x0010
++
++/* Command response types (low 2 bits of the command register). */
++#define CMD_RESP_NONE       0x00
++#define CMD_RESP_LONG       0x01
++#define CMD_RESP_SHORT      0x02
++#define CMD_RESP_SHORT_BUSY 0x03
++#define CMD_FLAG_CRC        0x08
++#define CMD_FLAG_INDEX      0x10
++#define CMD_FLAG_DATA       0x20
++
++#define SDHCI_BLOCK         512u
++#define CMD_TIMEOUT_NS      (1ull * NSEC_PER_SEC)
++#define INIT_TIMEOUT_NS     (2ull * NSEC_PER_SEC)
++
++static struct {
++	vm_offset_t regs;
++	uint16_t rca;
++	uint64_t first_block, nblocks;          /* partition, in 512-byte blocks */
++	uint32_t secsize;                       /* logical sector size for the BSD layer */
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool ready;
++	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
++} ss;
++
++static LCK_GRP_DECLARE(sargo_sdhci_grp, "sargo_sdhci");
++static LCK_MTX_DECLARE(sargo_sdhci_lock, &sargo_sdhci_grp);
++
++static inline uint8_t
++sdhci_rd8(uint32_t off)
++{
++	return *(volatile uint8_t *)(ss.regs + off);
++}
++
++static inline void
++sdhci_wr8(uint32_t off, uint8_t v)
++{
++	*(volatile uint8_t *)(ss.regs + off) = v;
++}
++
++static inline uint16_t
++sdhci_rd16(uint32_t off)
++{
++	return *(volatile uint16_t *)(ss.regs + off);
++}
++
++static inline void
++sdhci_wr16(uint32_t off, uint16_t v)
++{
++	*(volatile uint16_t *)(ss.regs + off) = v;
++}
++
++static inline uint32_t
++sdhci_rd32(uint32_t off)
++{
++	return *(volatile uint32_t *)(ss.regs + off);
++}
++
++static inline void
++sdhci_wr32(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(ss.regs + off) = v;
++}
++
++/*
++ * Set the SD clock to hz. SDCLK = base / (2 * divider); divider 0 means
++ * the base clock. If the Capabilities base clock is not believable the
++ * clock is left exactly as ABL left it (which must already work, since
++ * ABL reads from this eMMC) and init proceeds anyway.
++ */
++static void
++sdhci_set_clock(uint32_t hz)
++{
++	uint32_t caps = sdhci_rd32(REG_CAPABILITIES);
++	uint32_t base_mhz = (caps >> 8) & 0xff;
++	uint32_t div;
++	uint16_t clk;
++	uint64_t deadline;
++
++	if (base_mhz < 10 || base_mhz > 500) {
++		printf("SARGO SDHCI: base clock %u MHz not usable, leaving clock as ABL left it\n",
++		    base_mhz);
++		return;
++	}
++	div = (uint32_t)(((uint64_t)base_mhz * 1000000ull + (2ull * hz) - 1) / (2ull * hz));
++	if (div == 0) {
++		div = 1;
++	}
++	if (div > 1023) {
++		div = 1023;
++	}
++	/* SD clock off, internal clock on with the new divider. */
++	clk = (uint16_t)(((div & 0xff) << 8) | (((div >> 8) & 0x3) << 6) | 0x1);
++	sdhci_wr16(REG_CLOCK_CONTROL, clk);
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (!(sdhci_rd16(REG_CLOCK_CONTROL) & 0x2)) {
++		if (mach_absolute_time() > deadline) {
++			printf("SARGO SDHCI: internal clock never stabilised\n");
++			return;
++		}
++		delay(10);
++	}
++	sdhci_wr16(REG_CLOCK_CONTROL, clk | 0x4);      /* SD clock enable */
++	printf("SARGO SDHCI: clock %u Hz (base %u MHz, divider %u)\n",
++	    (uint32_t)((uint64_t)base_mhz * 1000000ull / (2ull * div)), base_mhz, div);
++}
++
++/*
++ * Issue one MMC command. flags is the low byte of the command register
++ * (response type | CRC | index | data). If data is set, one 512-byte
++ * block is read into ss.bounce. resp, if given, receives the response
++ * words (resp[0] = RESPONSE0). Returns 0 or an errno.
++ */
++static int
++sdhci_cmd(uint8_t idx, uint32_t arg, uint8_t flags, int data, uint32_t *resp)
++{
++	uint64_t deadline;
++	uint16_t nint, eint;
++	int error = 0;
++
++	/* Wait until the command line is free (and the data line, for data). */
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (sdhci_rd32(REG_PRESENT_STATE) & (data ? 0x3u : 0x1u)) {
++		if (mach_absolute_time() > deadline) {
++			printf("SARGO SDHCI: CMD%u: command line busy\n", idx);
++			return EBUSY;
++		}
++		delay(10);
++	}
++
++	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
++
++	if (data) {
++		sdhci_wr16(REG_BLOCK_SIZE, SDHCI_BLOCK);
++		sdhci_wr16(REG_BLOCK_COUNT, 1);
++		/* Block count enable + read direction, single block, PIO. */
++		sdhci_wr16(REG_TRANSFER_MODE, 0x12);
++	}
++	sdhci_wr32(REG_ARGUMENT, arg);
++	sdhci_wr16(REG_COMMAND, ((uint16_t)idx << 8) | flags);
++	__builtin_arm_dsb(0xf);
++
++	/* Wait for command complete or an error. */
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		nint = (uint16_t)(st & 0xffff);
++		eint = (uint16_t)(st >> 16);
++		if (nint & INT_CMD_COMPLETE) {
++			break;
++		}
++		if (eint || (nint & INT_ERROR)) {
++			error = (eint & EINT_CMD_TIMEOUT) ? ETIMEDOUT : EIO;
++			printf("SARGO SDHCI: CMD%u: error nint 0x%04x eint 0x%04x\n",
++			    idx, nint, eint);
++			goto out;
++		}
++		if (mach_absolute_time() > deadline) {
++			printf("SARGO SDHCI: CMD%u: command complete timeout\n", idx);
++			error = ETIMEDOUT;
++			goto out;
++		}
++		delay(10);
++	}
++
++	if (resp) {
++		resp[0] = sdhci_rd32(REG_RESPONSE0);
++		resp[1] = sdhci_rd32(REG_RESPONSE1);
++		resp[2] = sdhci_rd32(REG_RESPONSE2);
++		resp[3] = sdhci_rd32(REG_RESPONSE3);
++	}
++
++	/* R1 error flags. R3 (CMD1) and R6 (CMD3) carry no R1 error bits. */
++	if (resp && ((flags & 0x03) == CMD_RESP_SHORT ||
++	    (flags & 0x03) == CMD_RESP_SHORT_BUSY) &&
++	    idx != 1 && idx != 3 && (resp[0] & 0xfff80000u)) {
++		printf("SARGO SDHCI: CMD%u: card status error 0x%08x\n", idx, resp[0]);
++		error = EIO;
++		goto out;
++	}
++
++	if (!data) {
++		goto out;
++	}
++
++	/* Wait for the data buffer to fill, read it, wait for transfer complete. */
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		nint = (uint16_t)(st & 0xffff);
++		eint = (uint16_t)(st >> 16);
++		if (nint & INT_BUF_READ_READY) {
++			break;
++		}
++		if (eint || (nint & INT_ERROR)) {
++			error = (eint & EINT_DATA_TIMEOUT) ? ETIMEDOUT : EIO;
++			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
++			    idx, nint, eint);
++			goto out;
++		}
++		if (mach_absolute_time() > deadline) {
++			printf("SARGO SDHCI: CMD%u: buffer read ready timeout\n", idx);
++			error = ETIMEDOUT;
++			goto out;
++		}
++		delay(10);
++	}
++	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
++		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
++	}
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		nint = (uint16_t)(st & 0xffff);
++		eint = (uint16_t)(st >> 16);
++		if (nint & INT_XFER_COMPLETE) {
++			break;
++		}
++		if (eint || (nint & INT_ERROR)) {
++			error = EIO;
++			printf("SARGO SDHCI: CMD%u: transfer error nint 0x%04x eint 0x%04x\n",
++			    idx, nint, eint);
++			goto out;
++		}
++		if (mach_absolute_time() > deadline) {
++			printf("SARGO SDHCI: CMD%u: transfer complete timeout\n", idx);
++			error = ETIMEDOUT;
++			goto out;
++		}
++		delay(10);
++	}
++
++out:
++	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear for the next command */
++	return error;
++}
++
++/* CMD17: read one 512-byte block at lba into the bounce buffer. */
++static int
++sdhci_read_block(uint64_t lba)
++{
++	uint32_t resp[4];
++	if (lba > UINT32_MAX) {
++		return EINVAL;
++	}
++	return sdhci_cmd(17, (uint32_t)lba,
++	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX | CMD_FLAG_DATA, 1, resp);
++}
++
++/* Standard eMMC init: CMD0 -> CMD1 -> CMD2 -> CMD3 -> CMD9 -> CMD7 -> CMD16. */
++static int
++sdhci_init_card(void)
++{
++	uint32_t resp[4];
++	uint32_t caps, present;
++	int error;
++
++	/* Log the state ABL left behind; the first boot log is the only
++	 * way to learn it. */
++	caps = sdhci_rd32(REG_CAPABILITIES);
++	present = sdhci_rd32(REG_PRESENT_STATE);
++	printf("SARGO SDHCI: caps 0x%08x clkctl 0x%04x pwr 0x%02x hostctl 0x%02x hostctl2 0x%04x present 0x%08x\n",
++	    caps, sdhci_rd16(REG_CLOCK_CONTROL), sdhci_rd8(REG_POWER_CONTROL),
++	    sdhci_rd8(REG_HOST_CONTROL), sdhci_rd16(REG_HOST_CONTROL2), present);
++
++	/* 1-bit bus: the card reverts to 1-bit on CMD0, so the host must agree. */
++	sdhci_wr8(REG_HOST_CONTROL, 0x00);
++	/* Longest data timeout. */
++	sdhci_wr8(REG_TIMEOUT_CONTROL, 0x0e);
++	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);
++
++	/* 400 kHz identification clock (left alone if the base clock is unusable). */
++	sdhci_set_clock(400000);
++
++	/* CMD0: reset the card to idle. No response. */
++	error = sdhci_cmd(0, 0, CMD_RESP_NONE, 0, NULL);
++	if (error) {
++		return error;
++	}
++	delay(1000);                                    /* 1 ms */
++
++	/* CMD1: poll the OCR until the card is ready (busy bit set). */
++	{
++		uint64_t deadline;
++		nanoseconds_to_absolutetime(INIT_TIMEOUT_NS, &deadline);
++		deadline += mach_absolute_time();
++		for (;;) {
++			error = sdhci_cmd(1, 0x40ff8080u, CMD_RESP_SHORT, 0, resp);
++			if (error) {
++				return error;
++			}
++			if (resp[0] & 0x80000000u) {
++				break;
++			}
++			if (mach_absolute_time() > deadline) {
++				printf("SARGO SDHCI: CMD1: card never became ready (ocr 0x%08x)\n",
++				    resp[0]);
++				return ETIMEDOUT;
++			}
++			delay(10000);                       /* 10 ms */
++		}
++		printf("SARGO SDHCI: CMD1 ready, ocr 0x%08x\n", resp[0]);
++	}
++
++	/* CMD2: CID (136-bit). */
++	error = sdhci_cmd(2, 0, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
++	if (error) {
++		return error;
++	}
++	printf("SARGO SDHCI: CID %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
++
++	/* CMD3: assign RCA 2. */
++	error = sdhci_cmd(3, 0x00020000u,
++	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++	if (error) {
++		return error;
++	}
++	ss.rca = (uint16_t)(resp[0] >> 16);
++	printf("SARGO SDHCI: RCA %u\n", ss.rca);
++	if (ss.rca == 0) {
++		return EIO;
++	}
++
++	/* CMD9: CSD (136-bit). */
++	error = sdhci_cmd(9, (uint32_t)ss.rca << 16, CMD_RESP_LONG | CMD_FLAG_CRC, 0, resp);
++	if (error) {
++		return error;
++	}
++	printf("SARGO SDHCI: CSD %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
++
++	/* CMD7: select the card (TRAN state). */
++	error = sdhci_cmd(7, (uint32_t)ss.rca << 16,
++	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++	if (error) {
++		return error;
++	}
++
++	/* CMD16: 512-byte blocks. */
++	error = sdhci_cmd(16, 512,
++	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
++	if (error) {
++		return error;
++	}
++
++	printf("SARGO SDHCI: card in TRAN, RCA %u, 512-byte blocks\n", ss.rca);
++	return 0;
++}
++
++static int
++sdhci_find_partition(const char *want)
++{
++	const uint8_t *b = (const uint8_t *)ss.bounce;
++	uint64_t entry_lba, first, last;
++	uint32_t nent, esz;
++	int error;
++
++	error = sdhci_read_block(1);
++	if (error) {
++		return error;
++	}
++	if (memcmp(b, "EFI PART", 8) != 0) {
++		printf("SARGO SDHCI: no GPT\n");
++		return ENXIO;
++	}
++	memcpy(&entry_lba, b + 72, 8);
++	memcpy(&nent, b + 80, 4);
++	memcpy(&esz, b + 84, 4);
++	if (esz != 128 || nent == 0) {
++		printf("SARGO SDHCI: unsupported GPT entries %u x %u\n", nent, esz);
++		return ENXIO;
++	}
++	/* Scan the entry array one 512-byte block at a time (4 entries each). */
++	{
++		uint64_t cur_block = (uint64_t)-1;
++		for (uint32_t i = 0; i < nent; i++) {
++			uint64_t off = (uint64_t)i * esz;
++			uint64_t blk = entry_lba + off / SDHCI_BLOCK;
++			uint32_t boff = (uint32_t)(off % SDHCI_BLOCK);
++			const uint8_t *e;
++			char name[37];
++			unsigned c;
++			if (blk != cur_block) {
++				error = sdhci_read_block(blk);
++				if (error) {
++					return error;
++				}
++				cur_block = blk;
++			}
++			e = b + boff;
++			for (c = 0; c < 36; c++) {
++				uint16_t ch = (uint16_t)(e[56 + 2 * c] | (e[57 + 2 * c] << 8));
++				if (ch == 0 || ch > 0x7f) {
++					break;
++				}
++				name[c] = (char)ch;
++			}
++			name[c] = 0;
++			if (strcmp(name, want) != 0) {
++				continue;
++			}
++			memcpy(&first, e + 32, 8);
++			memcpy(&last, e + 40, 8);
++			if (last < first) {
++				return ENXIO;
++			}
++			ss.first_block = first;
++			ss.nblocks = last - first + 1;
++			return 0;
++		}
++	}
++	printf("SARGO SDHCI: no GPT partition named \"%s\"\n", want);
++	return ENOENT;
++}
++
++static int
++sargo_sdhci_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!ss.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++sargo_sdhci_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sargo_sdhci_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * ss.secsize;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = ss.nblocks * SDHCI_BLOCK;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > part_bytes || count > part_bytes - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&sargo_sdhci_lock);
++	for (uint32_t done = 0; done < count;) {
++		uint64_t pos = off + done;
++		uint64_t lba = pos / SDHCI_BLOCK;
++		uint32_t skip = (uint32_t)(pos % SDHCI_BLOCK);
++		uint32_t want = MIN(count - done, SDHCI_BLOCK - skip);
++		error = sdhci_read_block(ss.first_block + lba);
++		if (error) {
++			break;
++		}
++		memcpy(vaddr + done, (const uint8_t *)ss.bounce + skip, want);
++		done += want;
++		buf_setresid(bp, count - done);
++	}
++	lck_mtx_unlock(&sargo_sdhci_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sargo_sdhci_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = ss.secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*f < DEV_BSIZE || *f > SDHCI_BLOCK || (*f & (*f - 1))) {
++			return EINVAL;
++		}
++		ss.secsize = *f;
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = SDHCI_BLOCK;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = ss.nblocks * SDHCI_BLOCK / ss.secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = 256;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sargo_sdhci_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sargo_sdhci_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sargo_sdhci_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sargo_sdhci_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sargo_sdhci_psize(__unused dev_t dev)
++{
++	return ss.ready ? (int)MIN(ss.nblocks * SDHCI_BLOCK / ss.secsize, INT_MAX) : -1;
++}
++
++static int
++sargo_sdhci_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sargo_sdhci_strategy, NULL, dev, B_READ, minphys, uio, (int)ss.secsize);
++}
++
++static int
++sargo_sdhci_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw sargo_sdhci_bdevsw = {
++	.d_open     = sargo_sdhci_open,
++	.d_close    = sargo_sdhci_close,
++	.d_strategy = sargo_sdhci_strategy,
++	.d_ioctl    = sargo_sdhci_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sargo_sdhci_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sargo_sdhci_cdevsw = {
++	.d_open       = sargo_sdhci_open,
++	.d_close      = sargo_sdhci_close,
++	.d_read       = sargo_sdhci_read,
++	.d_write      = sargo_sdhci_write,
++	.d_ioctl      = sargo_sdhci_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sargo_sdhci_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	char want[64] = "userdata";
++	int error;
++
++	if (SecureDTLookupEntry(NULL, "/sargo-sdhci", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SARGO SDHCI: no /sargo-sdhci node in the device tree\n");
++		return ENXIO;
++	}
++	PE_parse_boot_argn("sdhciroot", want, sizeof(want));
++
++	ss.regs = ml_io_map(reg[0], reg[1]);
++	ss.secsize = DEV_BSIZE;
++
++	lck_mtx_lock(&sargo_sdhci_lock);
++	error = sdhci_init_card();
++	if (!error) {
++		error = sdhci_find_partition(want);
++	}
++	lck_mtx_unlock(&sargo_sdhci_lock);
++	if (error) {
++		return error;
++	}
++
++	ss.bmajor = bdevsw_add(-1, &sargo_sdhci_bdevsw);
++	if (ss.bmajor < 0) {
++		return ENXIO;
++	}
++	ss.cmajor = cdevsw_add_with_bdev(-1, &sargo_sdhci_cdevsw, ss.bmajor);
++	if (ss.cmajor < 0) {
++		return ENXIO;
++	}
++	ss.bdev = makedev(ss.bmajor, 0);
++	devfs_make_node(ss.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdhciroot0");
++	devfs_make_node(makedev(ss.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdhciroot0");
++	ss.ready = true;
++	printf("SARGO SDHCI: \"%s\": first block 0x%llx, %llu MiB, read-only\n",
++	    want, ss.first_block, ss.nblocks * SDHCI_BLOCK >> 20);
++	return 0;
++}
++
++/* Root device for rd=sdhciroot0 (IOFindBSDRoot). */
++int sargo_sdhci_rootdev(dev_t *dev);
++
++int
++sargo_sdhci_rootdev(dev_t *dev)
++{
++	if (!ss.ready) {
++		int error = sargo_sdhci_init();
++		if (error) {
++			return error;
++		}
++	}
++	*dev = ss.bdev;
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */

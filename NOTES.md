@@ -1,5 +1,40 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> SARGO SDHCI DRIVER, 2026-11-06 ~00:40 (Pepper, read first) <<<
+
+**Userdata is FLASHED with the iOS 16 root image** (00:26, 6 Nov 2026):
+44 sparse chunks, DONE 0, fastboot -S 256M (the phone's max-download-size
+is 0x10000000 = 256 MB, so -S 512M was rejected with "No enough buffer").
+Android userdata is gone, as Adam authorised 22:46 on 5 Nov.
+
+**SDHCI/eMMC driver written (patch 0082, this commit):**
+- `bsd/dev/sargo_sdhci.c` (724 lines): BSD bdevsw driver following the
+  sweet UFS driver pattern (patch 0028) exactly — same bdevsw/cdevsw/devfs
+  registration, same IOKitBSDInit.cpp `rd=` hook shape, same GPT scan.
+  Registers `sdhciroot0`/`rsdhciroot0`, root via `rd=sdhciroot0`.
+- Transport: PIO only, no DMA. CMD17 single-block reads through the
+  SDHCI buffer port (0x20), 512-byte blocks, one static bounce buffer.
+  Init: host left as ABL left it (no host reset), 1-bit bus, 400 kHz
+  clock (from Capabilities base clock, left alone if not believable),
+  CMD0 -> CMD1 (OCR 0x40ff8080, poll to ready) -> CMD2 -> CMD3 (RCA 2)
+  -> CMD9 -> CMD7 -> CMD16. Read-only; writes refused with EROFS.
+- ADT: mkadt-sargo.py adds `/sargo-sdhci` (compatible
+  qcom,sdhci-msm-v5, reg 0x7c4000/0x1000), omitted in --qemu like
+  sweet's UFS node. Phone ADT regenerated: 12,792 bytes, /product
+  present, dram-base 0x100000000 / dram-size 0x7e1c0000 (highmem).
+- Local syntax check passed (aarch64 cross-gcc + stub XNU headers);
+  patch verified to apply cleanly on top of 0028.
+- Precedent: lechaukha12/xnu-xzs design doc (CMD17 PIO, CMD0..CMD3/RCA 2,
+  400 kHz, 512-byte sectors). Do NOT copy its MSM8996 register address
+  (0x07464900); sargo's host is 0x7c4000.
+- Open questions: does ABL leave the SDHCI clock/power up (driver logs
+  caps/clkctl/pwr/hostctl/present at probe, so the first boot log shows
+  it); faster clocks (25/50 MHz) and DMA/HS400 are later steps.
+
+**Next:** CI build on the sargo branch, then pack a payload with
+rd=sdhciroot0, rebuild the shim boot image, fastboot boot, read the log
+for "SARGO SDHCI:" lines and a root mount.
+
 ## >>> FIRST XNU BOOT ON SARGO, 2026-11-05 22:41 (Pepper, read first) <<<
 
 **The unmodified sweet kernel BOOTED on the Pixel 3a.** fastboot boot of
@@ -29,9 +64,9 @@ up: 71 images on the phone, 67 smalls + system_a/b + vendor_a/b (4 files,
 8,145,338,368 bytes, 13.0 MB/s) on the USB stick, 12 critical ones on
 Pepper's VM with SHA-256.
 
-**Next:** the 16G iOS root image is on Oracle (~/iosroot-build/ios16-root.img).
-Flashing it to userdata needs Adam's explicit go-ahead; there is no raw
-userdata backup to restore from if it goes wrong.
+**Next:** the 16G iOS root image is FLASHED to userdata (00:26, 6 Nov
+2026, see the SDHCI section above). The SDHCI driver (patch 0082) is the
+step that lets the kernel read it; a CI build and a boot test are next.
 
 ## >>> SARGO UPDATE 2026-11-05 evening (Pepper, read first) <<<
 

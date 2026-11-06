@@ -6,8 +6,8 @@ SARGO variant of mkadt.py, 5 Nov 2026, revised with the live sargo FDT
 TIMEBASE (19.2 MHz) and VTIMER_INTID (19) are VERIFIED from the live FDT.
 Highmem EXISTS: the live memory node is <0x80000000 2G>,
 <0x100000000 0x7e2c0000>, so --highmem switches the dram window to the
-upper bank (sweet's pattern). UFS node is deleted: sargo is eMMC, storage
-driver is a later step.
+upper bank (sweet's pattern). UFS node is deleted: sargo is eMMC, and the
+storage node is /sargo-sdhci (patch 0082, bsd/dev/sargo_sdhci.c).
 Usage:  mkadt-sargo.py OUT.adt [--dump] [--qemu] [--highmem]
 """
 import hashlib, os, struct, sys
@@ -38,8 +38,13 @@ GICR, GICR_SIZE = 0x17a60000, 0x100000
 FB, FB_SIZE = 0x9c000000, 0x2400000  # sargo reserved fb_mem size
 SARGO_ECID = 0x534152474f000001  # 'SARGO' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2220, 1080 * 4
-# Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
+# Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none.
+# Sargo has no UFS; its storage is the SDHCI host below.
 UFS, UFS_SIZE = 0x01d84000, 0x3000
+# Internal eMMC host (sdhci@7c4000, qcom,sdhci-msm-v5). Live FDT reg =
+# 0x7c4000/0x1000 (hc) + 0x7c5000/0x1000 (cmdq); the driver maps only the
+# hc window. bsd/dev/sargo_sdhci.c reads this node (/sargo-sdhci).
+SDHCI, SDHCI_SIZE = 0x7c4000, 0x1000
 TIMEBASE = 19200000  # VERIFIED live FDT 5 Nov 2026: timer clock-frequency 0x124f800
 VTIMER_INTID = 19  # VERIFIED live FDT: virtual timer is the 3rd entry (1,3,0xf08), PPI 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -208,8 +213,13 @@ def build(seed=None, qemu=False, highmem=False):
         ('stride', u32(FB_STRIDE)),
     ])
 
-    # No storage node for sargo yet: eMMC SDHCI driver is a later step.
-    # RAM-disk first boot omits storage, like --qemu does for UFS.
+    # bsd/dev/sargo_sdhci.c: the eMMC SDHCI host ABL leaves running
+    # (absolute physical reg). Omitted in --qemu, like sweet's UFS node.
+    sdhci = node('sargo-sdhci', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm-v5')),
+        ('reg', u64(SDHCI, SDHCI_SIZE)),
+    ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
@@ -249,7 +259,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [sdhci]))
 
 
 if __name__ == '__main__':
