@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,936 @@
+@@ -0,0 +1,969 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -157,6 +157,7 @@ index 0000000..eb89c23
 +	uint16_t clkctl;                        /* diagnostic: clock control after set_clock */
 +	uint16_t last_nint, last_eint;          /* diagnostic: last interrupt status seen */
 +	uint32_t last_resp0;                    /* diagnostic: RESPONSE0 of the last command */
++	uint32_t last_pres;                     /* diagnostic: PRESENT_STATE at a data timeout */
 +	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
 +} ss;
 +
@@ -293,8 +294,6 @@ index 0000000..eb89c23
 +		delay(10);
 +	}
 +
-+	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
-+
 +	/* Block Size (0x04) and Block Count (0x06) form a single 32-bit
 +	 * register; Transfer Mode (0x0c) and Command (0x0e) form another.
 +	 * On the Qualcomm 32-bit AHB bus, separate 16-bit writes to the
@@ -303,8 +302,23 @@ index 0000000..eb89c23
 +	 * to Block Count wiped Block Size to 0 (build 13: buffer-ready
 +	 * fired for a 0-byte transfer, FIFO read zeros). */
 +	if (data) {
++		/* Reset the DAT line state machine and FIFO (SDHCI 2.2.13).
++		 * This forces BUFRDEN (PRESENT_STATE bit 11) back to 0 so a
++		 * stale value left by ABL cannot falsely trigger the
++		 * buffer-ready wait before the card has clocked any data
++		 * in (build 14: BUFRDEN was already 1 at t=0). */
++		sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* SW_RESET_DAT */
++		nanoseconds_to_absolutetime(100000000ULL, &deadline);
++		deadline += mach_absolute_time();
++		while (sdhci_rd8(REG_SOFTWARE_RESET) & 0x04) {
++			if (mach_absolute_time() > deadline) {
++				break;
++			}
++			delay(10);
++		}
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
++	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
 +	sdhci_wr32(REG_TRANSFER_MODE,
 +	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x10u : 0x00u));
@@ -378,14 +392,17 @@ index 0000000..eb89c23
 +			error = (eint & EINT_DATA_TIMEOUT) ? ETIMEDOUT : EIO;
 +			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
++			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
 +			printf("SARGO SDHCI: CMD%u: buffer read ready timeout\n", idx);
++			ss.last_pres = sdhci_rd32(REG_PRESENT_STATE);
 +			error = ETIMEDOUT;
++			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
-+		delay(10);
++		delay(50);
 +	}
 +	/* Drain the FIFO FIRST. Clearing buffer-ready before draining
 +	 * closes the data gate on SDCC and the reads return zeros
@@ -410,16 +427,31 @@ index 0000000..eb89c23
 +			error = EIO;
 +			printf("SARGO SDHCI: CMD%u: transfer error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
++			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			/* Fallback: no hardware error fired, so the 512 bytes
-+			 * are already in ss.bounce. The controller just never
-+			 * signalled completion. Proceed. */
++			/* Do NOT proceed if the DAT line is still active: the
++			 * hardware is still waiting for the card to finish
++			 * (build 14: the fallback abandoned a live transfer
++			 * and the FIFO read zeros). Only proceed when the DAT
++			 * line is idle, meaning the bytes are in ss.bounce
++			 * and the controller just never signalled completion. */
++			uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
++			if (p & 0x0004) {        /* Bit 2: DAT Line Active */
++				ss.last_pres = p;
++				error = ETIMEDOUT;
++				sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
++				printf("SARGO SDHCI: CMD%u: transfer still active, aborting\n", idx);
++				goto out;
++			}
 +			printf("SARGO SDHCI: CMD%u: no transfer-complete, proceeding anyway\n", idx);
 +			break;
 +		}
-+		delay(10);
++		delay(50);
++	}
++	if (sdhci_rd16(REG_INT_STATUS) & INT_XFER_COMPLETE) {
++		sdhci_wr16(REG_INT_STATUS, INT_XFER_COMPLETE);
 +	}
 +
 +out:
@@ -674,11 +706,12 @@ index 0000000..eb89c23
 +	mbr_sig = *(const uint16_t *)&b[510];
 +	printf("SARGO SDHCI: LBA 0 MBR sig 0x%04x (b0 0x%08x)\n", mbr_sig, ss.bounce[0]);
 +	if (mbr_sig != 0xaa55) {
-+		panic("SARGO SDHCI: LBA 0 b0 0x%08x sig 0x%04x blk 0x%08x xfer 0x%08x pres 0x%08x fcnt 0x%04x dcnt 0x%04x",
-+		      ss.bounce[0], mbr_sig,
-+		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE),
++		panic("SARGO: LBA 0 sig 0x%04x b0 0x%08x\n"
++		      "pres 0x%08x dcnt %u fcnt %u blk 0x%08x xfer 0x%08x",
++		      mbr_sig, ss.bounce[0],
 +		      sdhci_rd32(REG_PRESENT_STATE),
-+		      sdhci_rd32(0x308) & 0xffff, sdhci_rd32(0x35c) & 0xffff);
++		      sdhci_rd32(0x35c) & 0xffff, sdhci_rd32(0x308) & 0xffff,
++		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE));
 +	}
 +
 +	error = sdhci_read_block(1);
