@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,723 @@
+@@ -0,0 +1,726 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -719,7 +719,9 @@ index 0000000..eb89c23
 +
 +	PE_parse_boot_argn("sdhciroot", want, sizeof(want));
 +
++	printf("SARGO SDHCI: init start, mapping 0x%x\n", SARGO_SDHCI_BASE);
 +	ss.regs = ml_io_map(SARGO_SDHCI_BASE, SARGO_SDHCI_SIZE);
++	printf("SARGO SDHCI: mapped, reading caps\n");
 +	ss.secsize = DEV_BSIZE;
 +
 +	lck_mtx_lock(&sargo_sdhci_lock);
@@ -755,6 +757,7 @@ index 0000000..eb89c23
 +int
 +sargo_sdhci_rootdev(dev_t *dev)
 +{
++	printf("SARGO SDHCI: rootdev called\n");
 +	if (!ss.ready) {
 +		int error = sargo_sdhci_init();
 +		if (error) {
