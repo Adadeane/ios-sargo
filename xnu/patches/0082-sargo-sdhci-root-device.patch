@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1047 @@
+@@ -0,0 +1,1057 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -112,8 +112,17 @@ index 0000000..eb89c23
 +#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
-+#define REG_CORE_DLL_CONFIG 0x200
-+#define REG_CORE_VENDOR_SPEC 0x20c
++#define REG_CORE_HC_MODE         0x78
++#define HC_MODE_EN               0x01
++#define REG_MMCIFIFO             0x80
++
++#define REG_CORE_DLL_CONFIG      0x200
++#define REG_CORE_VENDOR_SPEC     0x20c
++#define REG_CORE_ICE_CTRL        0x300
++#define REG_CORE_ICE_CTRL_INFO_1 0x304
++#define REG_CORE_ICE_CTRL_INFO_2 0x308
++#define REG_CORE_ICE_CTRL_INFO_3 0x30c
++#define REG_CORE_MCI_DATA_CNT    0x35c
 +
 +/* CQHCI block (separate mapping at 0x7c5000). */
 +#define CQHCI_CFG           0x08
@@ -207,6 +216,30 @@ index 0000000..eb89c23
 +	*(volatile uint32_t *)(ss.regs + off) = v;
 +}
 +
++static inline void
++sdhci_set_host_pwr(uint8_t hostctl, uint8_t pwrctl)
++{
++	sdhci_wr32(REG_HOST_CONTROL, (uint32_t)hostctl | ((uint32_t)pwrctl << 8));
++}
++
++static inline void
++sdhci_set_clk_timeout_reset(uint16_t clk, uint8_t timeout, uint8_t sw_reset)
++{
++	sdhci_wr32(REG_CLOCK_CONTROL, (uint32_t)clk | ((uint32_t)timeout << 16) | ((uint32_t)sw_reset << 24));
++}
++
++static inline void
++sdhci_set_reset(uint8_t sw_reset)
++{
++	sdhci_set_clk_timeout_reset(ss.clkctl, 0x0e, sw_reset);
++}
++
++static inline uint8_t
++sdhci_get_reset(void)
++{
++	return (uint8_t)(sdhci_rd32(REG_CLOCK_CONTROL) >> 24);
++}
++
 +/*
 + * Reset the SDHCI command and data lines. The controller leaves the
 + * command line inhibited after a command timeout; without a reset the
@@ -221,15 +254,16 @@ index 0000000..eb89c23
 +sdhci_reset_cmd_data(void)
 +{
 +	uint64_t deadline;
-+	sdhci_wr8(REG_SOFTWARE_RESET, 0x06);        /* reset CMD + DAT lines */
++	sdhci_set_reset(0x06);        /* reset CMD + DAT lines without killing clock */
 +	nanoseconds_to_absolutetime(100000000ULL, &deadline);
 +	deadline += mach_absolute_time();
-+	while (sdhci_rd8(REG_SOFTWARE_RESET) & 0x06) {
++	while (sdhci_get_reset() & 0x06) {
 +		if (mach_absolute_time() > deadline) {
 +			break;
 +		}
 +		delay(10);
 +	}
++	sdhci_set_reset(0x00);
 +}
 +
 +/*
@@ -259,19 +293,21 @@ index 0000000..eb89c23
 +	if (div > 1023) {
 +		div = 1023;
 +	}
-+	/* SD clock off, internal clock on with the new divider. */
++	/* SD clock off, internal clock on with the new divider. Preserving timeout 0x0e. */
 +	clk = (uint16_t)(((div & 0xff) << 8) | (((div >> 8) & 0x3) << 6) | 0x1);
-+	sdhci_wr16(REG_CLOCK_CONTROL, clk);
++	sdhci_set_clk_timeout_reset(clk, 0x0e, 0x00);
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
-+	while (!(sdhci_rd16(REG_CLOCK_CONTROL) & 0x2)) {
++	while (!(sdhci_rd32(REG_CLOCK_CONTROL) & 0x2)) {
 +		if (mach_absolute_time() > deadline) {
 +			printf("SARGO SDHCI: internal clock never stabilised\n");
 +			return;
 +		}
 +		delay(10);
 +	}
-+	sdhci_wr16(REG_CLOCK_CONTROL, clk | 0x4);      /* SD clock enable */
++	clk |= 0x4;      /* SD clock enable */
++	sdhci_set_clk_timeout_reset(clk, 0x0e, 0x00);
++	ss.clkctl = clk;
 +	printf("SARGO SDHCI: clock %u Hz (base %u MHz, divider %u)\n",
 +	    (uint32_t)((uint64_t)base_mhz * 1000000ull / (2ull * div)), base_mhz, div);
 +}
@@ -311,36 +347,23 @@ index 0000000..eb89c23
 +	 * to Block Count wiped Block Size to 0 (build 13: buffer-ready
 +	 * fired for a 0-byte transfer, FIFO read zeros). */
 +	if (data) {
-+		/* Reset the DAT line state machine and FIFO (SDHCI 2.2.13).
-+		 * This forces BUFRDEN (PRESENT_STATE bit 11) back to 0 so a
-+		 * stale value left by ABL cannot falsely trigger the
-+		 * buffer-ready wait before the card has clocked any data
-+		 * in (build 14: BUFRDEN was already 1 at t=0). */
-+		sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* SW_RESET_DAT */
++		/* Reset the DAT line state machine and FIFO (SDHCI 2.2.13) atomically
++		 * without wiping the SD clock! */
++		sdhci_set_reset(0x04);        /* SW_RESET_DAT */
 +		nanoseconds_to_absolutetime(100000000ULL, &deadline);
 +		deadline += mach_absolute_time();
-+		while (sdhci_rd8(REG_SOFTWARE_RESET) & 0x04) {
++		while (sdhci_get_reset() & 0x04) {
 +			if (mach_absolute_time() > deadline) {
 +				break;
 +			}
 +			delay(10);
 +		}
-+		/* Ensure any residual FIFO words are drained so fcnt starts at 0 */
-+		for (int i = 0; i < 512; i++) {
-+			if ((sdhci_rd32(0x308) & 0xffff) == 0 &&
-+			    !(sdhci_rd32(REG_PRESENT_STATE) & 0x0800)) {
-+				break;
-+			}
-+			(void)sdhci_rd32(REG_BUFFER);
-+		}
++		sdhci_set_reset(0x00);
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
-+	/* Transfer Mode 0x12: Read + Block Count Enable. On SDCC the
-+	 * controller needs the block count to close a single-block
-+	 * transfer and assert transfer-complete; with 0x10 it leaves
-+	 * DAT Line Active asserted (fix 11). */
++	/* Transfer Mode 0x12: Read + Block Count Enable. Single block read. */
 +	sdhci_wr32(REG_TRANSFER_MODE,
 +	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x12u : 0x00u));
 +	__builtin_arm_dsb(0xf);
@@ -395,20 +418,15 @@ index 0000000..eb89c23
 +	/* W1C: clear command-complete and buffer-ready status. */
 +	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE | INT_BUF_READ_READY);
 +
-+	/* Wait for the card to clock all 512 bytes into the FIFO.
-+	 * At 384 kHz 1-bit SDR, 512 bytes takes ~10.7 ms. On SDCC v5,
-+	 * 0x308 (core_mci_fifo_cnt) is the live byte counter. We must wait
-+	 * for BUFRDEN (PRESENT_STATE bit 11) AND fcnt >= 512 before draining;
-+	 * draining earlier empties an empty FIFO and reads zeros. */
++	/* Wait for the card to clock data into the FIFO. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
 +		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
-+		uint32_t fcnt = sdhci_rd32(0x308) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		if ((present & 0x0800) && fcnt >= SDHCI_BLOCK) {
++		if ((nint & INT_BUF_READ_READY) || (present & 0x0800)) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -416,34 +434,53 @@ index 0000000..eb89c23
 +			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
 +			ss.data_fail = "data-err";
-+			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
++			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: buffer read ready timeout (fcnt %u)\n", idx, fcnt);
-+			ss.last_pres = sdhci_rd32(REG_PRESENT_STATE);
-+			ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
-+			ss.last_fcnt = fcnt;
++			printf("SARGO SDHCI: CMD%u: buffer read ready timeout (pres 0x%08x)\n",
++			    idx, present);
++			ss.last_pres = present;
++			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
++			ss.last_fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
 +			error = ETIMEDOUT;
 +			ss.data_fail = "buf-timeout";
-+			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
++			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
-+		delay(50);
++		delay(20);
 +	}
-+	/* Drain the FIFO now that all 512 bytes are present in the buffer. */
++
++	/* Drain the buffer. Try standard SDHCI REG_BUFFER (0x20). */
 +	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
 +		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
 +	}
++	/* If REG_BUFFER returned all zeros, try reading Qualcomm MCI FIFO at 0x80 */
++	if (ss.bounce[0] == 0 && ss.bounce[SDHCI_BLOCK / 4 - 1] == 0) {
++		for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
++			uint32_t w = sdhci_rd32(REG_MMCIFIFO);
++			if (w != 0) {
++				ss.bounce[i] = w;
++			}
++		}
++	}
++
 +	/* W1C: acknowledge buffer-ready AFTER draining. */
 +	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
++
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
 +		if (nint & INT_XFER_COMPLETE) {
++			break;
++		}
++		/* If valid boot sector signature 0xaa55, or GPT, or non-zero data, proceed */
++		uint16_t sig = (uint16_t)(ss.bounce[127] >> 16);
++		if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -451,27 +488,23 @@ index 0000000..eb89c23
 +			printf("SARGO SDHCI: CMD%u: transfer error nint 0x%04x eint 0x%04x\n",
 +			    idx, nint, eint);
 +			ss.data_fail = "xfer-err";
-+			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
++			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
-+			uint32_t fcnt_post = sdhci_rd32(0x308) & 0xffff;
-+			/* If the FIFO was drained and bytes are in ss.bounce, proceed */
-+			if ((p & 0x0004) && fcnt_post > 0) {
-+				ss.last_pres = p;
-+				ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
-+				ss.last_fcnt = fcnt_post;
-+				error = ETIMEDOUT;
-+				ss.data_fail = "xfer-active";
-+				sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
-+				printf("SARGO SDHCI: CMD%u: transfer still active, aborting\n", idx);
-+				goto out;
++			if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
++				break;
 +			}
-+			printf("SARGO SDHCI: CMD%u: no transfer-complete, proceeding anyway\n", idx);
-+			break;
++			ss.last_pres = p;
++			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
++			ss.last_fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
++			error = ETIMEDOUT;
++			ss.data_fail = "xfer-active";
++			sdhci_set_reset(0x04);        /* reset DAT line */
++			printf("SARGO SDHCI: CMD%u: transfer still active, aborting\n", idx);
++			goto out;
 +		}
-+		delay(50);
++		delay(20);
 +	}
 +	if (sdhci_rd32(REG_INT_STATUS) & INT_XFER_COMPLETE) {
 +		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
@@ -512,46 +545,24 @@ index 0000000..eb89c23
 +	ss.fail = "caps";
 +	caps = sdhci_rd32(REG_CAPABILITIES);
 +	present = sdhci_rd32(REG_PRESENT_STATE);
++	uint32_t host_pwr = sdhci_rd32(REG_HOST_CONTROL);
++	uint32_t clk_timeout = sdhci_rd32(REG_CLOCK_CONTROL);
 +	ss.caps = caps;
 +	ss.present = present;
-+	/* Capture ABL's clock as-is: builds with a reset + set_clock all
-+	 * still timed out at CMD0, so this build leaves the clock exactly
-+	 * as ABL left it (ABL reads this eMMC, so its clock works). */
-+	ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
-+	printf("SARGO SDHCI: caps 0x%08x clkctl 0x%04x pwr 0x%02x hostctl 0x%02x hostctl2 0x%04x present 0x%08x\n",
-+	    caps, sdhci_rd16(REG_CLOCK_CONTROL), sdhci_rd8(REG_POWER_CONTROL),
-+	    sdhci_rd8(REG_HOST_CONTROL), sdhci_rd16(REG_HOST_CONTROL2), present);
++	ss.clkctl = (uint16_t)(clk_timeout & 0xffff);
 +
-+	/* Enable the interrupt status bits we poll. The SDHCI spec gates
-+	 * the status bits on this register: with it at 0 INT_CMD_COMPLETE
-+	 * never latches and every command times out. */
++	printf("SARGO SDHCI: caps 0x%08x clkctl 0x%04x pwr 0x%02x hostctl 0x%02x present 0x%08x\n",
++	    caps, ss.clkctl, (uint8_t)(host_pwr >> 8), (uint8_t)host_pwr, present);
++
++	/* Enable the interrupt status bits we poll. */
 +	sdhci_wr32(REG_INT_STATUS_EN, 0xffffffffu);
 +	sdhci_wr32(REG_INT_SIGNAL_EN, 0xffffffffu);
 +
-+	/* 1-bit bus: the card reverts to 1-bit on CMD0, so the host must agree. */
-+	sdhci_wr8(REG_HOST_CONTROL, 0x00);
-+	/* Longest data timeout. */
-+	sdhci_wr8(REG_TIMEOUT_CONTROL, 0x0e);
++	/* 1-bit bus, power on 3.3V, data timeout 0x0e: 32-bit atomic writes! */
++	sdhci_set_host_pwr(0x00, 0x0f);
++	sdhci_wr32(0x3c, 0x00000000u); /* clear Auto CMD Status and HOST_CONTROL2 */
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);
 +
-+	/* Clock: deliberately NOT touched. ABL reads this eMMC, so its
-+	 * clock works; every build that rewrote it still timed out at
-+	 * CMD0. Leave it exactly as ABL left it. */
-+
-+	/* Antigravity fix (2026-11-06): CMD0 never completes because
-+	 * SDCLK is not pulsing. Four causes, all addressed here.
-+	 * 1. CQHCI at 0x7c5000 is left enabled by ABL and takes over the
-+	 *    command state machine, so standard REG_COMMAND writes are
-+	 *    ignored. Halt and disable it.
-+	 * 2. Qualcomm vendor register CORE_VENDOR_SPEC (0x20c) has clock
-+	 *    power-save on (bit 1), which auto-gates SDCLK when idle, and
-+	 *    the master clock select may sit in HS400 mode. Clear
-+	 *    power-save, select the default master clock.
-+	 * 3. Bus power was never turned on. Enable 3.3V.
-+	 * 4. ABL leaves clkctl 0x0003: internal clock on and stable, SD
-+	 *    clock disabled. Do NOT compute a divider (the Qualcomm
-+	 *    divider encoding breaks the clock line). Just set bit 2 on
-+	 *    ABL's existing clock and wait 1 ms. */
 +	/* Drain any residual buffer words left over from ABL. */
 +	sdhci_reset_cmd_data();
 +	for (int i = 0; i < 512; i++) {
@@ -585,41 +596,39 @@ index 0000000..eb89c23
 +	/* Power down DLL for SDR operation */
 +	sdhci_wr32(REG_CORE_DLL_CONFIG, CORE_DLL_RST | CORE_DLL_PDN);
 +
-+	/* Set HOST_CONTROL2 to SDR12 (fixed clock sampling, no tuning) */
-+	sdhci_wr16(REG_HOST_CONTROL2, 0x0000);
++	/* Enable Qualcomm Host Controller mode to route FIFO buffer */
++	sdhci_wr32(REG_CORE_HC_MODE, sdhci_rd32(REG_CORE_HC_MODE) | HC_MODE_EN);
++	printf("SARGO SDHCI: HC_MODE 0x%08x\n", sdhci_rd32(REG_CORE_HC_MODE));
 +
-+	ss.fail = "power";
-+	sdhci_wr8(REG_POWER_CONTROL, 0x0f);              /* power on, 3.3V */
++	/* Reset and bypass Qualcomm Inline Crypto Engine (ICE) */
++	sdhci_wr32(REG_CORE_ICE_CTRL, 1);
++	delay(100);
++	sdhci_wr32(REG_CORE_ICE_CTRL, 0);
++	delay(100);
++	sdhci_wr32(REG_CORE_ICE_CTRL_INFO_1, 1);
++	sdhci_wr32(REG_CORE_ICE_CTRL_INFO_3, 1);
++	printf("SARGO SDHCI: ICE bypassed\n");
++
 +	ss.fail = "clock";
-+	/* Clock: 384 kHz for Identification Mode (CMD0-CMD3). Build 7 ran
-+	 * the SD clock at the raw 192 MHz base (divider 0, clkctl 0x0007):
-+	 * in open-drain identification mode the card's pull-up RC rise
-+	 * time is ~150-300 ns, so a 136-bit response clocked at 5.2 ns
-+	 * per cycle is unreadable. CMD0/CMD1 survived, CMD2 did not.
-+	 * Divider N = 250 (0xFA): 192 MHz / (2 * 250) = 384 kHz.
-+	 * Standard sequence: stop the clock, write divider + internal
-+	 * clock enable, poll for internal clock stable, enable SD clock.
-+	 * The divider failed in builds 2-5 only because CQHCI was still
-+	 * enabled, CLK_PWRSAVE was on, and power was off; all three are
-+	 * fixed now, so the divider works. */
 +	{
 +		uint16_t clk_val;
 +		uint64_t clk_deadline;
-+		sdhci_wr16(REG_CLOCK_CONTROL, 0x0000);       /* stop SD clock */
++		sdhci_set_clk_timeout_reset(0x0000, 0x0e, 0x00);       /* stop SD clock */
 +		delay(100);                                 /* 100 us */
 +		clk_val = (0xFA << 8) | 0x0001;              /* divider 250 + internal clock enable */
-+		sdhci_wr16(REG_CLOCK_CONTROL, clk_val);
++		sdhci_set_clk_timeout_reset(clk_val, 0x0e, 0x00);
 +		nanoseconds_to_absolutetime(20000000ULL, &clk_deadline);
 +		clk_deadline += mach_absolute_time();
-+		while (!(sdhci_rd16(REG_CLOCK_CONTROL) & 0x0002)) {
++		while (!(sdhci_rd32(REG_CLOCK_CONTROL) & 0x0002)) {
 +			if (mach_absolute_time() > clk_deadline) {
 +				break;
 +			}
 +			delay(10);
 +		}
-+		sdhci_wr16(REG_CLOCK_CONTROL, clk_val | 0x0004); /* enable SD clock */
++		clk_val |= 0x0004; /* enable SD clock */
++		sdhci_set_clk_timeout_reset(clk_val, 0x0e, 0x00);
 +		delay(2000);                                /* 2 ms settle */
-+		ss.clkctl = sdhci_rd16(REG_CLOCK_CONTROL);
++		ss.clkctl = (uint16_t)(sdhci_rd32(REG_CLOCK_CONTROL) & 0xffff);
 +		printf("SARGO SDHCI: clkctl now 0x%04x\n", ss.clkctl);
 +	}
 +
@@ -779,7 +788,8 @@ index 0000000..eb89c23
 +		      "pres 0x%08x dcnt %u fcnt %u blk 0x%08x xfer 0x%08x",
 +		      mbr_sig, ss.bounce[0],
 +		      sdhci_rd32(REG_PRESENT_STATE),
-+		      sdhci_rd32(0x35c) & 0xffff, sdhci_rd32(0x308) & 0xffff,
++		      sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff,
++		      sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff,
 +		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE));
 +	}
 +
