@@ -392,7 +392,7 @@ index 0000000..eb89c23
 +		ss_adma[1].addr_hi = 0;
 +
 +		/* Flush descriptor to RAM and clean/invalidate bounce buffer */
-+		flush_dcache64(desc_phys, sizeof(ss_adma), FALSE);
++		flush_dcache64(desc_phys, sizeof(ss_adma), TRUE);
 +		flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
 +
 +		/* Program 64-bit ADMA descriptor table pointer */
