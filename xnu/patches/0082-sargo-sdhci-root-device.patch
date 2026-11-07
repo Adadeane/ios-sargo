@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1037 @@
+@@ -0,0 +1,1051 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -112,6 +112,24 @@ index 0000000..eb89c23
 +#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
++#define REG_ADMA_ERROR      0x54
++#define REG_ADMA_ADDR_LO    0x58
++#define REG_ADMA_ADDR_HI    0x5c
++#define SDHCI_CTRL_ADMA64   0x18u
++
++/*
++ * SDHCI 64-bit ADMA2 Descriptor (12 bytes, 96-bit).
++ * Standard SD Host Controller Specification v3.0 / v4.10 (non-v4_mode).
++ * SDCC v5 expects 12-byte descriptors prior to CQE initialization.
++ */
++struct __attribute__((packed, aligned(4))) sdhci_adma2_desc64 {
++	uint16_t cmd;      /* attr: VALID (0x01) | END (0x02) | TRAN (0x20) = 0x0023 */
++	uint16_t len;      /* length in bytes: SDHCI_BLOCK = 512 = 0x0200 */
++	uint32_t addr_lo;  /* physical buffer address [31:0] */
++	uint32_t addr_hi;  /* physical buffer address [63:32] */
++};
++
++static struct sdhci_adma2_desc64 ss_adma[2] __attribute__((aligned(64)));
 +#define REG_CORE_DLL_CONFIG      0x200
 +#define REG_CORE_VENDOR_SPEC     0x20c
 +#define REG_CORE_MCI_FIFO_CNT    0x308
@@ -354,15 +372,39 @@ index 0000000..eb89c23
 +		}
 +		sdhci_set_reset(0x00);
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
++
++		/* Configure 64-bit ADMA2 in REG_HOST_CONTROL (0x18: 1-bit bus, 64-bit ADMA2) */
++		sdhci_set_host_pwr(0x18, 0x0f);
++
++		/* Populate 64-bit ADMA2 descriptor table */
++		uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
++		uint64_t desc_phys = (uint64_t)kvtophys((vm_offset_t)ss_adma);
++
++		memset(ss_adma, 0, sizeof(ss_adma));
++		ss_adma[0].cmd = 0x0023u; /* ADMA2_TRAN_VALID (0x21) | ADMA2_END (0x02) */
++		ss_adma[0].len = SDHCI_BLOCK;
++		ss_adma[0].addr_lo = (uint32_t)(bounce_phys & 0xffffffffu);
++		ss_adma[0].addr_hi = (uint32_t)(bounce_phys >> 32);
++
++		ss_adma[1].cmd = 0x0003u; /* ADMA2_NOP_END_VALID */
++		ss_adma[1].len = 0;
++		ss_adma[1].addr_lo = 0;
++		ss_adma[1].addr_hi = 0;
++
++		/* Flush descriptor to RAM and clean/invalidate bounce buffer */
++		flush_dcache64(desc_phys, sizeof(ss_adma), FALSE);
++		flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
++
++		/* Program 64-bit ADMA descriptor table pointer */
++		sdhci_wr32(REG_ADMA_ADDR_LO, (uint32_t)(desc_phys & 0xffffffffu));
++		sdhci_wr32(REG_ADMA_ADDR_HI, (uint32_t)(desc_phys >> 32));
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
-+	/* Transfer Mode: Single block read with Block Count Enable, NO DMA (0x0012).
-+	 * Qualcomm SDCC v5 caps (0x742dc8b2) bit 22 is 0: SDMA is not implemented
-+	 * in hardware; data must be transferred via pure PIO through REG_BUFFER (0x20).
++	/* Transfer Mode: Single block read with Block Count Enable + 64-bit ADMA2 (0x0013).
 +	 * Written atomically with Command index and flags as a single 32-bit dword. */
 +	sdhci_wr32(REG_TRANSFER_MODE,
-+	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x0012u : 0x0000u));
++	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x0013u : 0x0000u));
 +	__builtin_arm_dsb(0xf);
 +
 +	/* Wait for command complete or an error. */
@@ -412,78 +454,49 @@ index 0000000..eb89c23
 +		goto out;
 +	}
 +
-+	/* W1C: clear command-complete status ONLY. Do NOT clear INT_BUF_READ_READY prematurely! */
++	/* W1C: clear command-complete status ONLY. */
 +	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE);
 +
-+	/* Wait for the card to transmit 512 bytes into the controller buffer.
-+	 * Check: INT_BUF_READ_READY (bit 5) OR BUFRDEN (bit 11 in REG_PRESENT_STATE, 0x0800)
-+	 * OR CORE_MCI_FIFO_CNT (0x308) >= 512. */
++	/* Wait for 64-bit ADMA2 data transfer complete or error. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
-+		uint32_t pres = sdhci_rd32(REG_PRESENT_STATE);
-+		uint32_t fcnt = sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
 +
-+		if ((nint & INT_BUF_READ_READY) || (pres & 0x0800) || fcnt >= SDHCI_BLOCK) {
++		if (nint & INT_XFER_COMPLETE) {
++			/* ADMA2 transfer completed: invalidate CPU data cache over bounce buffer */
++			uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
++			flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
++			__builtin_arm_isb();
++			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +			break;
 +		}
 +
 +		if (eint || (nint & INT_ERROR)) {
++			uint32_t adma_err = sdhci_rd32(REG_ADMA_ERROR);
 +			error = (eint & EINT_DATA_TIMEOUT) ? ETIMEDOUT : EIO;
-+			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
-+			    idx, nint, eint);
-+			ss.data_fail = "data-err";
++			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x adma_err 0x%08x\n",
++			    idx, nint, eint, adma_err);
++			ss.data_fail = "adma-err";
 +			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: buffer timeout (pres 0x%08x, fcnt %u)\n",
-+			    idx, pres, fcnt);
++			uint32_t pres = sdhci_rd32(REG_PRESENT_STATE);
++			uint32_t fcnt = sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff;
++			uint32_t adma_err = sdhci_rd32(REG_ADMA_ERROR);
++			printf("SARGO SDHCI: CMD%u: transfer timeout (pres 0x%08x fcnt %u adma_err 0x%08x)\n",
++			    idx, pres, fcnt, adma_err);
 +			ss.last_pres = pres;
 +			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
 +			ss.last_fcnt = fcnt;
 +			error = ETIMEDOUT;
-+			ss.data_fail = "buf-timeout";
++			ss.data_fail = "xfer-timeout";
 +			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
-+		}
-+		delay(10);
-+	}
-+
-+	/* Pure PIO drain: read 128 words (512 bytes) directly from REG_BUFFER (0x20). */
-+	for (unsigned i = 0; i < SDHCI_BLOCK / sizeof(uint32_t); i++) {
-+		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
-+	}
-+
-+	/* W1C: acknowledge buffer-ready AFTER draining the buffer. */
-+	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
-+
-+	/* Qualcomm SDCC v5 single-block PIO quirk:
-+	 * If the buffer contains valid MBR or GPT data, complete immediately! */
-+	uint16_t sig = *(const uint16_t *)((const uint8_t *)ss.bounce + 510);
-+	if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
-+		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
-+		error = 0;
-+		goto out;
-+	}
-+
-+	/* Otherwise wait briefly for INT_XFER_COMPLETE. */
-+	nanoseconds_to_absolutetime(100000000ULL, &deadline);
-+	deadline += mach_absolute_time();
-+	for (;;) {
-+		uint32_t st = sdhci_rd32(REG_INT_STATUS);
-+		nint = (uint16_t)(st & 0xffff);
-+		eint = (uint16_t)(st >> 16);
-+		if (nint & INT_XFER_COMPLETE) {
-+			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
-+			break;
-+		}
-+		if (eint || (nint & INT_ERROR) || mach_absolute_time() > deadline) {
-+			break;
 +		}
 +		delay(10);
 +	}
@@ -535,8 +548,8 @@ index 0000000..eb89c23
 +	sdhci_wr32(REG_INT_STATUS_EN, 0xffffffffu);
 +	sdhci_wr32(REG_INT_SIGNAL_EN, 0xffffffffu);
 +
-+	/* 1-bit bus, power on 3.3V, data timeout 0x0e: 32-bit atomic writes! */
-+	sdhci_set_host_pwr(0x00, 0x0f);
++	/* 1-bit bus, 64-bit ADMA2 (0x18), power on 3.3V: 32-bit atomic writes! */
++	sdhci_set_host_pwr(0x18, 0x0f);
 +	sdhci_wr32(0x3c, 0x00000000u); /* clear Auto CMD Status and HOST_CONTROL2 */
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);
 +
@@ -577,6 +590,7 @@ index 0000000..eb89c23
 +	if (ss.cq_regs) {
 +		*(volatile uint32_t *)(ss.cq_regs + ICE_NONCQ_CRYPTO_PARAMS) = 0x00000000u;
 +		*(volatile uint32_t *)(ss.cq_regs + ICE_NONCQ_CRYPTO_DUN) = 0x00000000u;
++		sdhci_wr32(0x260, sdhci_rd32(0x260) | (1u << 15)); /* DISABLE_CRYPTO */
 +		__builtin_arm_dsb(0xf);
 +		printf("SARGO SDHCI: ICE bypassed in cq_regs\n");
 +	}
