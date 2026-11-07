@@ -1225,7 +1225,6 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertIn("com.apple.springboard.ui", insp.amfi_source)
         self.assertIn("com.apple.backboardd", insp.amfi_source)
         self.assertIn("imgp->ip_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;", insp.exec_source)
-        self.assertIn("p->p_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;", insp.exec_source)
         self.assertIn("if ((flags & CS_PLATFORM_BINARY) == 0 && (flags & CS_VALID))", insp.cs_source)
 
 

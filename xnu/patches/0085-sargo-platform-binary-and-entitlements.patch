@@ -30,7 +30,7 @@ diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
 diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7421,8 +7421,10 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7421,8 +7421,9 @@ process_signature(proc_t p, struct image_params *imgp)
  				error = EACCES;
  				goto done;
  			}
@@ -38,7 +38,6 @@ diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 -			/* SWEET runs every iOS binary this way: one short line per exec. */
 +			/* SWEET runs every iOS binary as a platform binary: one short line per exec. */
 +			imgp->ip_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;
-+			p->p_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;
  			printf("exec %s\n", p->p_name);
  #else
  			printf("Allowing spawn of iOS binary %s since it has "
