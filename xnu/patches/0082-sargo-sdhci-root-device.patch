@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1064 @@
+@@ -0,0 +1,1066 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -88,6 +88,7 @@ index 0000000..eb89c23
 +/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern addr64_t kvtophys(vm_offset_t va);
++extern void sweet_sample_start(void);
 +
 +/* SDHCI standard register offsets (SD Host Controller spec). */
 +#define REG_DMA_ADDR        0x00
@@ -1080,6 +1081,7 @@ index 0000000..eb89c23
 +	ss.ready = true;
 +	printf("SARGO SDHCI: \"%s\": first block 0x%llx, %llu MiB, read-only\n",
 +	    want, ss.first_block, ss.nblocks * SDHCI_BLOCK >> 20);
++	sweet_sample_start();
 +	return 0;
 +}
 +

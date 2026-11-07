@@ -1,0 +1,55 @@
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -10,7 +10,7 @@
+  * with tools/sweet-crash.py). A thread blocked in a syscall shows the
+  * syscall stub in pc and its caller in lr/bt.
+  *
+- * First sample 90 s after start, then every 120 s, 40 samples at most.
++ * First sample 30 s after start, then every 30 s, 40 samples at most.
+  */
+ #include <sys/param.h>
+ #include <sys/systm.h>
+@@ -24,11 +24,14 @@
+ extern int hz;
+ extern void sweet_sample_start(void);
+ 
+-static char sweet_sample_names[128];
++static char sweet_sample_names[256];
+ 
+ static bool
+ sweet_sample_wanted(const char *name)
+ {
++	if (strcmp(sweet_sample_names, "all") == 0) {
++		return true;
++	}
+ 	size_t n = strlen(name);
+ 	for (const char *t = sweet_sample_names; *t;) {
+ 		const char *end = strchr(t, ',');
+@@ -48,6 +51,7 @@
+ {
+ 	char name[32];
+ 	proc_name(proc_pid(p), name, sizeof(name));
++	printf("SMP proc: [%d] %s\n", proc_pid(p), name);
+ 	if (sweet_sample_wanted(name)) {
+ 		task_t task = proc_task(p);
+ 		if (task != TASK_NULL) {
+@@ -62,15 +66,15 @@
+ {
+ 	static int chan;
+ 	if (!PE_parse_boot_argn("sweetsample", sweet_sample_names, sizeof(sweet_sample_names))) {
+-		strlcpy(sweet_sample_names, "SpringBoard,backboardd", sizeof(sweet_sample_names));
++		strlcpy(sweet_sample_names, "launchd,xpcproleaccountd,xpcroleaccountd,usermanagerd,xpcproxy,SpringBoard,backboardd", sizeof(sweet_sample_names));
+ 	}
+ 	if (sweet_sample_names[0] == '-') {
+ 		return;
+ 	}
+-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
++	(void)tsleep(&chan, PZERO, "sweetsmp", 30 * hz);
+ 	for (int i = 0; i < 40; i++) {
+-		printf("SMP --- sample %d\n", i);
++		printf("SMP --- sample %d (%d s)\n", i, (i + 1) * 30);
+ 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
+-		(void)tsleep(&chan, PZERO, "sweetsmp", 120 * hz);
++		(void)tsleep(&chan, PZERO, "sweetsmp", 30 * hz);
+ 	}
+ }

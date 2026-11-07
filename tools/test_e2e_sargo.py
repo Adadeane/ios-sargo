@@ -233,6 +233,60 @@ class Patch0083Inspector:
         return res.returncode == 0, res.stderr.strip()
 
 
+class Patch0084Inspector:
+    """Extracts, parses, and statically validates patch 0084."""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.patch_path = os.path.join(REPO_ROOT, "xnu/patches/0084-sargo-process-sampler-diagnostics.patch")
+        self.raw_patch = self._read_patch()
+        self.hunk_files = self._parse_hunks()
+        self.sample_source = self.hunk_files.get("bsd/dev/sweet_sample.c", "")
+
+    def _read_patch(self):
+        if not os.path.exists(self.patch_path):
+            return ""
+        with open(self.patch_path, "r", errors="replace") as f:
+            return f.read()
+
+    def _parse_hunks(self):
+        hunks = {}
+        cur_file = None
+        cur_lines = []
+        for line in self.raw_patch.splitlines(True):
+            if line.startswith("+++ b/"):
+                if cur_file:
+                    hunks[cur_file] = "".join(cur_lines)
+                cur_file = line[6:].strip()
+                cur_lines = []
+            elif cur_file:
+                if line.startswith("diff --git"):
+                    hunks[cur_file] = "".join(cur_lines)
+                    cur_file = None
+                    cur_lines = []
+                elif line.startswith("+") and not line.startswith("+++"):
+                    cur_lines.append(line[1:])
+                elif line.startswith(" ") and not line.startswith("   "):
+                    cur_lines.append(line[1:])
+        if cur_file and cur_lines:
+            hunks[cur_file] = "".join(cur_lines)
+        return hunks
+
+    def validate_patch_syntax(self):
+        res = subprocess.run(
+            ["git", "apply", "--stat", self.patch_path],
+            capture_output=True, text=True, check=False
+        )
+        return res.returncode == 0, res.stderr.strip()
+
+
 class MockPhysicalMemory:
     """Simulates physical RAM for SDMA bus-master transfers and cache coherency."""
 
@@ -947,6 +1001,12 @@ class TestTier1Feature8BlockDeviceMount(unittest.TestCase):
         self.assertIn("sargo_total_bytes_read", strat_body)
         self.assertIn("printf(\"SARGO SDHCI: %llu MB read from eMMC\\n\"", strat_body)
 
+    def test_09_sdhci_invokes_sweet_sample_start(self):
+        """Verify sargo_sdhci.c declares and calls sweet_sample_start() in sargo_sdhci_init()."""
+        self.assertIn("extern void sweet_sample_start(void);", self.insp.raw_patch)
+        init_body = self.insp.get_function_body("sargo_sdhci_init")
+        self.assertIn("sweet_sample_start();", init_body)
+
 
 class TestTier1Feature9PreemptiveBootAudit(unittest.TestCase):
     """Feature 9: Preemptive Boot Audit."""
@@ -1027,11 +1087,11 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"validate-repo.py failed:\n{res.stdout}\n{res.stderr}")
 
     def test_02_patch_sequence_contiguous(self):
-        """Verify patch files 0001..0083 are contiguous with no gaps."""
+        """Verify patch files 0001..0084 are contiguous with no gaps."""
         patches = sorted(glob.glob(os.path.join(REPO_ROOT, "xnu/patches/*.patch")))
         numbers = [int(os.path.basename(p).split("-")[0]) for p in patches]
-        self.assertEqual(len(patches), 83)
-        self.assertEqual(numbers, list(range(1, 84)))
+        self.assertEqual(len(patches), 84)
+        self.assertEqual(numbers, list(range(1, 85)))
 
     def test_03_all_python_tools_syntax(self):
         """Verify all python scripts in tools/ compile cleanly."""
@@ -1083,6 +1143,17 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertIn("scdir_path", insp.vm_source)
         self.assertIn("/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld", insp.vm_source)
         self.assertIn("on sweet/sargo, dyld cache mappings are accepted unconditionally", insp.vm_source)
+
+    def test_08_patch_0084_process_sampler_diagnostics(self):
+        """Verify patch 0084 process sampler diagnostics configuration in sweet_sample.c."""
+        insp = Patch0084Inspector.get_instance()
+        valid, err = insp.validate_patch_syntax()
+        self.assertTrue(valid, f"Patch 0084 git apply --stat failed: {err}")
+        self.assertIn("30 * hz", insp.sample_source)
+        self.assertIn("launchd,xpcproleaccountd,xpcroleaccountd,usermanagerd,xpcproxy,SpringBoard,backboardd", insp.sample_source)
+        self.assertIn('strcmp(sweet_sample_names, "all") == 0', insp.sample_source)
+        self.assertIn('printf("SMP proc: [%d] %s\\n", proc_pid(p), name);', insp.sample_source)
+        self.assertIn('printf("SMP --- sample %d (%d s)\\n", i, (i + 1) * 30);', insp.sample_source)
 
 
 class TestTier1Feature11VersionControlCI(unittest.TestCase):
