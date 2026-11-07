@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1051 @@
+@@ -0,0 +1,1052 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -469,7 +469,7 @@ index 0000000..eb89c23
 +			/* ADMA2 transfer completed: invalidate CPU data cache over bounce buffer */
 +			uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
 +			flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
-+			__builtin_arm_isb();
++			__builtin_arm_dsb(0xf);
 +			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +			break;
 +		}
@@ -528,6 +528,7 @@ index 0000000..eb89c23
 +{
 +	uint32_t resp[4];
 +	uint32_t caps, present;
++	uint32_t host_pwr, clk_timeout;
 +	int error;
 +
 +	/* Log the state ABL left behind; the first boot log is the only
@@ -535,8 +536,8 @@ index 0000000..eb89c23
 +	ss.fail = "caps";
 +	caps = sdhci_rd32(REG_CAPABILITIES);
 +	present = sdhci_rd32(REG_PRESENT_STATE);
-+	uint32_t host_pwr = sdhci_rd32(REG_HOST_CONTROL);
-+	uint32_t clk_timeout = sdhci_rd32(REG_CLOCK_CONTROL);
++	host_pwr = sdhci_rd32(REG_HOST_CONTROL);
++	clk_timeout = sdhci_rd32(REG_CLOCK_CONTROL);
 +	ss.caps = caps;
 +	ss.present = present;
 +	ss.clkctl = (uint16_t)(clk_timeout & 0xffff);
