@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1052 @@
+@@ -0,0 +1,1064 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -281,11 +281,11 @@ index 0000000..eb89c23
 +
 +/*
 + * Set the SD clock to hz. SDCLK = base / (2 * divider); divider 0 means
-+ * the base clock. If the Capabilities base clock is not believable the
-+ * clock is left exactly as ABL left it (which must already work, since
-+ * ABL reads from this eMMC) and init proceeds anyway.
++ * the base clock. On Qualcomm SDCC v5, the host base clock from GCC PLL
++ * is 200 MHz if the Capabilities register does not declare one.
++ * Returns 0 on success, or ETIMEDOUT if internal clock fails to stabilise.
 + */
-+static void
++static int
 +sdhci_set_clock(uint32_t hz)
 +{
 +	uint32_t caps = sdhci_rd32(REG_CAPABILITIES);
@@ -295,9 +295,7 @@ index 0000000..eb89c23
 +	uint64_t deadline;
 +
 +	if (base_mhz < 10 || base_mhz > 500) {
-+		printf("SARGO SDHCI: base clock %u MHz not usable, leaving clock as ABL left it\n",
-+		    base_mhz);
-+		return;
++		base_mhz = 200; /* Qualcomm SDCC v5 base clock is 200 MHz */
 +	}
 +	div = (uint32_t)(((uint64_t)base_mhz * 1000000ull + (2ull * hz) - 1) / (2ull * hz));
 +	if (div == 0) {
@@ -313,16 +311,18 @@ index 0000000..eb89c23
 +	deadline += mach_absolute_time();
 +	while (!(sdhci_rd32(REG_CLOCK_CONTROL) & 0x2)) {
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: internal clock never stabilised\n");
-+			return;
++			printf("SARGO SDHCI: internal clock never stabilised (div %u)\n", div);
++			return ETIMEDOUT;
 +		}
 +		delay(10);
 +	}
 +	clk |= 0x4;      /* SD clock enable */
 +	sdhci_set_clk_timeout_reset(clk, 0x0e, 0x00);
++	delay(2000);     /* 2 ms settle */
 +	ss.clkctl = clk;
-+	printf("SARGO SDHCI: clock %u Hz (base %u MHz, divider %u)\n",
-+	    (uint32_t)((uint64_t)base_mhz * 1000000ull / (2ull * div)), base_mhz, div);
++	printf("SARGO SDHCI: clock %u Hz (base %u MHz, divider %u, clkctl 0x%04x)\n",
++	    (uint32_t)((uint64_t)base_mhz * 1000000ull / (2ull * div)), base_mhz, div, ss.clkctl);
++	return 0;
 +}
 +
 +/*
@@ -597,27 +597,7 @@ index 0000000..eb89c23
 +	}
 +
 +	ss.fail = "clock";
-+	{
-+		uint16_t clk_val;
-+		uint64_t clk_deadline;
-+		sdhci_set_clk_timeout_reset(0x0000, 0x0e, 0x00);       /* stop SD clock */
-+		delay(100);                                 /* 100 us */
-+		clk_val = (0xFA << 8) | 0x0001;              /* divider 250 + internal clock enable */
-+		sdhci_set_clk_timeout_reset(clk_val, 0x0e, 0x00);
-+		nanoseconds_to_absolutetime(20000000ULL, &clk_deadline);
-+		clk_deadline += mach_absolute_time();
-+		while (!(sdhci_rd32(REG_CLOCK_CONTROL) & 0x0002)) {
-+			if (mach_absolute_time() > clk_deadline) {
-+				break;
-+			}
-+			delay(10);
-+		}
-+		clk_val |= 0x0004; /* enable SD clock */
-+		sdhci_set_clk_timeout_reset(clk_val, 0x0e, 0x00);
-+		delay(2000);                                /* 2 ms settle */
-+		ss.clkctl = (uint16_t)(sdhci_rd32(REG_CLOCK_CONTROL) & 0xffff);
-+		printf("SARGO SDHCI: clkctl now 0x%04x\n", ss.clkctl);
-+	}
++	sdhci_set_clock(400000);
 +
 +	/* CMD0: reset the card to idle. No response. */
 +	ss.fail = "CMD0";
@@ -751,6 +731,25 @@ index 0000000..eb89c23
 +	}
 +
 +	printf("SARGO SDHCI: card in TRAN, RCA %u, 512-byte blocks\n", ss.rca);
++
++	/*
++	 * Elevate clock from 400 kHz identification frequency to 25 MHz
++	 * high-speed default SDR mode (~3.1 MB/s throughput, 62.5x speedup).
++	 * Verify with a test read; if it fails, fall back to 400 kHz.
++	 */
++	error = sdhci_set_clock(25000000);
++	if (!error) {
++		error = sdhci_read_block(0);
++		if (error) {
++			printf("SARGO SDHCI: 25 MHz read verify failed (%d), falling back to 400 kHz\n", error);
++			sdhci_set_clock(400000);
++		} else {
++			printf("SARGO SDHCI: 25 MHz high-speed transfer mode enabled and verified OK\n");
++		}
++	} else {
++		printf("SARGO SDHCI: 25 MHz clock setup failed (%d), remaining at 400 kHz\n", error);
++		sdhci_set_clock(400000);
++	}
 +	return 0;
 +}
 +
@@ -909,6 +908,14 @@ index 0000000..eb89c23
 +		done += want;
 +		buf_setresid(bp, count - done);
 +	}
++	if (!error) {
++		static uint64_t sargo_total_bytes_read = 0;
++		sargo_total_bytes_read += count;
++		if ((sargo_total_bytes_read >> 20) != ((sargo_total_bytes_read - count) >> 20) &&
++		    ((sargo_total_bytes_read >> 20) % 5) == 0) {
++			printf("SARGO SDHCI: %llu MB read from eMMC\n", sargo_total_bytes_read >> 20);
++		}
++	}
 +	lck_mtx_unlock(&sargo_sdhci_lock);
 +	buf_unmap(bp);
 +
@@ -948,11 +955,14 @@ index 0000000..eb89c23
 +	case DKIOCISWRITABLE:
 +		*f = 1;
 +		return 0;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE:
++		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTREAD:
 +		*o = 256;
 +		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTWRITE:
-+		*o = 0;
++		*o = 256;
 +		return 0;
 +	case DKIOCGETMAXSEGMENTCOUNTREAD:
 +	case DKIOCGETMAXSEGMENTCOUNTWRITE:
@@ -1065,6 +1075,8 @@ index 0000000..eb89c23
 +	ss.bdev = makedev(ss.bmajor, 0);
 +	devfs_make_node(ss.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdhciroot0");
 +	devfs_make_node(makedev(ss.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdhciroot0");
++	devfs_make_node(ss.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufsroot0");
++	devfs_make_node(makedev(ss.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rufsroot0");
 +	ss.ready = true;
 +	printf("SARGO SDHCI: \"%s\": first block 0x%llx, %llu MiB, read-only\n",
 +	    want, ss.first_block, ss.nblocks * SDHCI_BLOCK >> 20);

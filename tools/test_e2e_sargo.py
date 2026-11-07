@@ -927,6 +927,26 @@ class TestTier1Feature8BlockDeviceMount(unittest.TestCase):
         self.assertIn('strlcpy(rootName, rdBootVar, rootNameSize);', self.insp.iokit_source)
         self.assertIn('goto iofrootx;', self.insp.iokit_source)
 
+    def test_06_sdhci_ioctl_synchronize_cache(self):
+        """Verify DKIOCSYNCHRONIZE and DKIOCSYNCHRONIZECACHE return 0 in sargo_sdhci_ioctl."""
+        ioctl_body = self.insp.get_function_body("sargo_sdhci_ioctl")
+        self.assertIn("case DKIOCSYNCHRONIZE:", ioctl_body)
+        self.assertIn("case DKIOCSYNCHRONIZECACHE:", ioctl_body)
+        self.assertIn("*o = 256;", ioctl_body)
+
+    def test_07_sdhci_high_speed_clock_elevation(self):
+        """Verify 25 MHz clock elevation and fallback logic in sdhci_init_card."""
+        init_body = self.insp.get_function_body("sdhci_init_card")
+        self.assertIn("sdhci_set_clock(25000000);", init_body)
+        self.assertIn("sdhci_read_block(0);", init_body)
+        self.assertIn("sdhci_set_clock(400000);", init_body)
+
+    def test_08_sdhci_strategy_telemetry(self):
+        """Verify live I/O progress telemetry in sargo_sdhci_strategy."""
+        strat_body = self.insp.get_function_body("sargo_sdhci_strategy")
+        self.assertIn("sargo_total_bytes_read", strat_body)
+        self.assertIn("printf(\"SARGO SDHCI: %llu MB read from eMMC\\n\"", strat_body)
+
 
 class TestTier1Feature9PreemptiveBootAudit(unittest.TestCase):
     """Feature 9: Preemptive Boot Audit."""
@@ -1347,14 +1367,20 @@ class TestTier4RealWorldAcceptance(unittest.TestCase):
         init_body = insp.get_function_body("sargo_sdhci_init")
         pattern = r'devfs_make_node\((.+?),\s*(DEVFS_[A-Z]+),\s*UID_ROOT,\s*GID_OPERATOR,\s*(0[0-7]+),\s*"([^"]+)"\)'
         matches = re.findall(pattern, init_body)
-        self.assertEqual(len(matches), 2, "Must register exactly two devfs nodes")
+        self.assertEqual(len(matches), 4, "Must register four devfs nodes (sdhciroot0, rsdhciroot0, and ufsroot0 aliases)")
         node_map = {m[3]: {"dev": m[0].strip(), "type": m[1].strip(), "mode": m[2].strip()} for m in matches}
         self.assertIn("sdhciroot0", node_map)
         self.assertIn("rsdhciroot0", node_map)
+        self.assertIn("ufsroot0", node_map)
+        self.assertIn("rufsroot0", node_map)
         self.assertEqual(node_map["sdhciroot0"]["type"], "DEVFS_BLOCK")
         self.assertEqual(node_map["sdhciroot0"]["mode"], "0640")
         self.assertEqual(node_map["rsdhciroot0"]["type"], "DEVFS_CHAR")
         self.assertEqual(node_map["rsdhciroot0"]["mode"], "0640")
+        self.assertEqual(node_map["ufsroot0"]["type"], "DEVFS_BLOCK")
+        self.assertEqual(node_map["ufsroot0"]["mode"], "0640")
+        self.assertEqual(node_map["rufsroot0"]["type"], "DEVFS_CHAR")
+        self.assertEqual(node_map["rufsroot0"]["mode"], "0640")
 
 
 # -----------------------------------------------------------------------------
