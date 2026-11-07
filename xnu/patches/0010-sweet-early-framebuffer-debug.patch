@@ -42,8 +42,8 @@ index e26a1d7..e3579f1 100644
 +			key[k] = '\0';
 +			const char *found = NULL;
 +			size_t klen = strlen(key);
-+			for (const char *p = args->command_line; *p; p++) {
-+				if ((p == args->command_line || *(p - 1) == ' ') &&
++			for (const char *p = args->CommandLine; *p; p++) {
++				if ((p == args->CommandLine || *(p - 1) == ' ') &&
 +				    strncmp(p, key, klen) == 0 &&
 +				    (p[klen] == '=' || p[klen] == ' ' || p[klen] == '\0')) {
 +					found = p;
@@ -51,11 +51,11 @@ index e26a1d7..e3579f1 100644
 +				}
 +			}
 +			if (!found) {
-+				size_t cur = strlen(args->command_line);
++				size_t cur = strlen(args->CommandLine);
 +				size_t add = strlen(s_req_args[i]);
-+				if (cur + add + 2 < sizeof(args->command_line)) {
-+					args->command_line[cur] = ' ';
-+					memcpy(&args->command_line[cur + 1], s_req_args[i], add + 1);
++				if (cur + add + 2 < sizeof(args->CommandLine)) {
++					args->CommandLine[cur] = ' ';
++					memcpy(&args->CommandLine[cur + 1], s_req_args[i], add + 1);
 +				}
 +			}
 +		}

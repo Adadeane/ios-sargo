@@ -925,10 +925,11 @@ class TestTier1Feature9PreemptiveBootAudit(unittest.TestCase):
         self.assertIn("ARM64_BOARD_CONFIG_SWEET", content)
 
     def test_07_patch_0010_boot_args_injection(self):
-        """Verify patch 0010 auto-injects essential tokens into args->command_line."""
+        """Verify patch 0010 auto-injects essential tokens into args->CommandLine."""
         patch_path = os.path.join(REPO_ROOT, "xnu/patches/0010-sweet-early-framebuffer-debug.patch")
         with open(patch_path, "r") as f:
             content = f.read()
+        self.assertIn("args->CommandLine", content)
         self.assertIn("unentitled_ios_sim_launch=1", content)
         self.assertIn("ignition_level=1", content)
         self.assertIn("launchd_unsecure_cache=1", content)
