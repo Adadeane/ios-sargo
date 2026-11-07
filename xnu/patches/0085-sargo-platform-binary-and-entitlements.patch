@@ -1,32 +1,53 @@
 diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
 --- a/bsd/kern/kern_cs.c
 +++ b/bsd/kern/kern_cs.c
-@@ -291,6 +291,17 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+@@ -291,6 +291,10 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
  		retval = 1;
  		proc_csflags_update(p, flags);
  	} else {
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
-+		if ((flags & CS_PLATFORM_BINARY) == 0 && (flags & CS_VALID)) {
-+			flags &= ~CS_VALID;
-+			cs_procs_invalidated++;
-+			verbose = 1;
-+			proc_csflags_update(p, flags);
-+			cs_process_invalidated(NULL);
-+		} else {
-+			proc_csflags_update(p, flags);
-+		}
++		flags |= CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;
++		proc_csflags_update(p, flags);
 +#else
  		if (flags & CS_VALID) {
  			flags &= ~CS_VALID;
  			cs_procs_invalidated++;
-@@ -300,6 +311,7 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+@@ -300,5 +304,6 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
  		} else {
  			proc_csflags_update(p, flags);
  		}
 +#endif
  	}
  	proc_unlock(p);
+@@ -492,8 +497,12 @@
+ int
+ csblob_get_platform_binary(struct cs_blob *blob)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	return 1;
++#else
+ 	if (blob && blob->csb_platform_binary) {
+ 		return 1;
+ 	}
+ 	return 0;
++#endif
+ }
+@@ -871,11 +880,15 @@
+ int
+ csproc_get_platform_binary(struct proc *p)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	return 1;
++#else
+ 	struct cs_blob *csblob;
  
+ 	csblob = csproc_get_blob(p);
+ 
+ 	/* If there is no csblob this returns 0 because
+ 	 *  it is true that it is not a platform binary */
+ 	return (csblob == NULL) ? 0 : csblob->csb_platform_binary;
++#endif
+ }
 diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
@@ -41,6 +62,21 @@ diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  			printf("exec %s\n", p->p_name);
  #else
  			printf("Allowing spawn of iOS binary %s since it has "
+diff -Naur a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
+--- a/bsd/kern/kern_proc.c
++++ b/bsd/kern/kern_proc.c
+@@ -3261,8 +3261,11 @@
+ 	case CS_OPS_STATUS: {
+ 		uint32_t retflags;
+ 
+ 		proc_lock(pt);
+ 		retflags = (uint32_t)proc_getcsflags(pt);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		retflags |= CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;
++#endif
+ 		if (cs_process_enforcement(pt)) {
+ 			retflags |= CS_ENFORCEMENT;
+ 		}
 diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
 --- a/bsd/kern/sweet_amfi.c
 +++ b/bsd/kern/sweet_amfi.c

@@ -304,6 +304,7 @@ class Patch0085Inspector:
         self.hunk_files = self._parse_hunks()
         self.cs_source = self.hunk_files.get("bsd/kern/kern_cs.c", "")
         self.exec_source = self.hunk_files.get("bsd/kern/kern_exec.c", "")
+        self.proc_source = self.hunk_files.get("bsd/kern/kern_proc.c", "")
         self.amfi_source = self.hunk_files.get("bsd/kern/sweet_amfi.c", "")
 
     def _read_patch(self):
@@ -1225,7 +1226,10 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertIn("com.apple.springboard.ui", insp.amfi_source)
         self.assertIn("com.apple.backboardd", insp.amfi_source)
         self.assertIn("imgp->ip_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;", insp.exec_source)
-        self.assertIn("if ((flags & CS_PLATFORM_BINARY) == 0 && (flags & CS_VALID))", insp.cs_source)
+        self.assertIn("flags |= CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;", insp.cs_source)
+        self.assertIn("csproc_get_platform_binary", insp.cs_source)
+        self.assertIn("csblob_get_platform_binary", insp.cs_source)
+        self.assertIn("retflags |= CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;", insp.proc_source)
 
 
 class TestTier1Feature11VersionControlCI(unittest.TestCase):
