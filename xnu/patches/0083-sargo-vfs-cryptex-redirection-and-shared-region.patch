@@ -1,0 +1,127 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+index 5dd85c7..45f83a6 100644
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -278,6 +278,67 @@ retry_copy:
+ 	ndp->ni_pathlen = (u_int)bytes_copied;
+ 	bytes_copied = 0;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * SARGO/SWEET Cryptex VFS Redirection:
++	 * In iOS 16, dyld shared cache and Cryptex assets are located under
++	 * /private/preboot/Cryptexes/OS/ and /private/preboot/Cryptexes/App/.
++	 * Transparently redirect lookups targeting:
++	 * 1) System/Library/Caches/com.apple.dyld -> private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
++	 * 2) System/Cryptexes/OS -> private/preboot/Cryptexes/OS
++	 * 3) System/Cryptexes/App -> private/preboot/Cryptexes/App
++	 * Preserving any leading slash and updating ndp->ni_pathlen.
++	 */
++	{
++		const char *p = cnp->cn_pnbuf;
++		bool leading_slash = false;
++		if (p[0] == '/') {
++			leading_slash = true;
++			p++;
++		}
++		const char *redir_prefix = NULL;
++		const char *tail = NULL;
++		static const char kDyldCachePrefix[] = "System/Library/Caches/com.apple.dyld";
++		static const size_t kDyldCacheLen = sizeof(kDyldCachePrefix) - 1;
++		static const char kCryptexOSPrefix[] = "System/Cryptexes/OS";
++		static const size_t kCryptexOSLen = sizeof(kCryptexOSPrefix) - 1;
++		static const char kCryptexAppPrefix[] = "System/Cryptexes/App";
++		static const size_t kCryptexAppLen = sizeof(kCryptexAppPrefix) - 1;
++
++		if (strncmp(p, kDyldCachePrefix, kDyldCacheLen) == 0 &&
++		    (p[kDyldCacheLen] == '\0' || p[kDyldCacheLen] == '/')) {
++			redir_prefix = "private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld";
++			tail = p + kDyldCacheLen;
++		} else if (strncmp(p, kCryptexOSPrefix, kCryptexOSLen) == 0 &&
++		    (p[kCryptexOSLen] == '\0' || p[kCryptexOSLen] == '/')) {
++			redir_prefix = "private/preboot/Cryptexes/OS";
++			tail = p + kCryptexOSLen;
++		} else if (strncmp(p, kCryptexAppPrefix, kCryptexAppLen) == 0 &&
++		    (p[kCryptexAppLen] == '\0' || p[kCryptexAppLen] == '/')) {
++			redir_prefix = "private/preboot/Cryptexes/App";
++			tail = p + kCryptexAppLen;
++		}
++
++		if (redir_prefix != NULL) {
++			size_t new_len = (leading_slash ? 1 : 0) + strlen(redir_prefix) + strlen(tail) + 1;
++			if (new_len <= MAXPATHLEN) {
++				char *redir_buf = zalloc(ZV_NAMEI);
++				if (redir_buf != NULL) {
++					snprintf(redir_buf, MAXPATHLEN, "%s%s%s",
++					    leading_slash ? "/" : "", redir_prefix, tail);
++					if (cnp->cn_flags & HASBUF) {
++						zfree(ZV_NAMEI, cnp->cn_pnbuf);
++					}
++					cnp->cn_pnbuf = redir_buf;
++					cnp->cn_pnlen = MAXPATHLEN;
++					cnp->cn_flags |= HASBUF;
++					ndp->ni_pathlen = (u_int)new_len;
++				}
++			}
++		}
++	}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ 	/*
+ 	 * Since the name cache may contain positive entries of
+ 	 * the incorrect case, force lookup() to bypass the cache
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index f711b8c..1091954 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -405,7 +405,15 @@ int vm_shared_region_unnest_log_interval = 10;
+ int shared_region_unnest_log_count_threshold = 5;
+ 
+ 
+-#if XNU_TARGET_OS_OSX
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++static int scdir_enforce = 0;
++static char *scdir_path[] = {
++	"/System/Library/Caches/com.apple.dyld/",
++	"/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
++	"/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
++	NULL
++};
++#elif XNU_TARGET_OS_OSX
+ 
+ #if defined (__x86_64__)
+ static int scdir_enforce = 1;
+@@ -2428,6 +2436,9 @@ shared_region_map_and_slide_setup(
+ 		 * Check if the shared cache is in the trust cache;
+ 		 * if so, we can skip the root ownership check.
+ 		 */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		goto after_root_check;
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+ #if DEVELOPMENT || DEBUG
+ 		/*
+ 		 * Skip both root ownership and trust cache check if
+@@ -2517,7 +2528,11 @@ after_root_check:
+ #endif /* XNU_TARGET_OS_OSX && defined(__arm64__) */
+ 
+ #if CONFIG_CSR
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (0) {
++#else
+ 		if (csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) {
++#endif
+ 			VATTR_INIT(&va);
+ 			VATTR_WANTED(&va, va_flags);
+ 			error = vnode_getattr(srfmp->vp, &va, vfs_context_current());
+@@ -2656,6 +2671,11 @@ scdir_ok:
+ 		}
+ 
+ 		/* check that the mappings are properly covered by code signatures */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (1) {
++			/* on sweet/sargo, dyld cache mappings are accepted unconditionally */
++		} else
++#endif
+ 		if (!cs_system_enforcement()) {
+ 			/* code signing is not enforced: no need to check */
+ 		} else {

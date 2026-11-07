@@ -178,6 +178,61 @@ class Patch0082Inspector:
         return self.c_source[start:]
 
 
+class Patch0083Inspector:
+    """Extracts, parses, and statically validates patch 0083."""
+
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.patch_path = os.path.join(REPO_ROOT, "xnu/patches/0083-sargo-vfs-cryptex-redirection-and-shared-region.patch")
+        self.raw_patch = self._read_patch()
+        self.hunk_files = self._parse_hunks()
+        self.vfs_source = self.hunk_files.get("bsd/vfs/vfs_lookup.c", "")
+        self.vm_source = self.hunk_files.get("bsd/vm/vm_unix.c", "")
+
+    def _read_patch(self):
+        if not os.path.exists(self.patch_path):
+            return ""
+        with open(self.patch_path, "r", errors="replace") as f:
+            return f.read()
+
+    def _parse_hunks(self):
+        hunks = {}
+        cur_file = None
+        cur_lines = []
+        for line in self.raw_patch.splitlines(True):
+            if line.startswith("+++ b/"):
+                if cur_file:
+                    hunks[cur_file] = "".join(cur_lines)
+                cur_file = line[6:].strip()
+                cur_lines = []
+            elif cur_file:
+                if line.startswith("diff --git"):
+                    hunks[cur_file] = "".join(cur_lines)
+                    cur_file = None
+                    cur_lines = []
+                elif line.startswith("+") and not line.startswith("+++"):
+                    cur_lines.append(line[1:])
+                elif line.startswith(" ") and not line.startswith("   "):
+                    cur_lines.append(line[1:])
+        if cur_file and cur_lines:
+            hunks[cur_file] = "".join(cur_lines)
+        return hunks
+
+    def validate_patch_syntax(self):
+        res = subprocess.run(
+            ["git", "apply", "--stat", self.patch_path],
+            capture_output=True, text=True, check=False
+        )
+        return res.returncode == 0, res.stderr.strip()
+
+
 class MockPhysicalMemory:
     """Simulates physical RAM for SDMA bus-master transfers and cache coherency."""
 
@@ -952,10 +1007,11 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"validate-repo.py failed:\n{res.stdout}\n{res.stderr}")
 
     def test_02_patch_sequence_contiguous(self):
-        """Verify patch files 0001..0082 are contiguous with no gaps."""
+        """Verify patch files 0001..0083 are contiguous with no gaps."""
         patches = sorted(glob.glob(os.path.join(REPO_ROOT, "xnu/patches/*.patch")))
         numbers = [int(os.path.basename(p).split("-")[0]) for p in patches]
-        self.assertEqual(numbers, list(range(1, len(patches) + 1)))
+        self.assertEqual(len(patches), 83)
+        self.assertEqual(numbers, list(range(1, 84)))
 
     def test_03_all_python_tools_syntax(self):
         """Verify all python scripts in tools/ compile cleanly."""
@@ -983,6 +1039,30 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
             self.assertTrue("--- " in head or "diff " in head, f"Missing diff header in {p}")
         valid, err = Patch0082Inspector.get_instance().validate_patch_syntax()
         self.assertTrue(valid, f"Patch 0082 git apply --stat failed: {err}")
+
+    def test_06_patch_0083_vfs_cryptex_redirection(self):
+        """Verify patch 0083 VFS Cryptex path redirection logic in vfs_lookup.c."""
+        insp = Patch0083Inspector.get_instance()
+        valid, err = insp.validate_patch_syntax()
+        self.assertTrue(valid, f"Patch 0083 git apply --stat failed: {err}")
+        self.assertIn("ARM64_BOARD_CONFIG_SWEET", insp.vfs_source)
+        self.assertIn("System/Library/Caches/com.apple.dyld", insp.vfs_source)
+        self.assertIn("private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld", insp.vfs_source)
+        self.assertIn("System/Cryptexes/OS", insp.vfs_source)
+        self.assertIn("private/preboot/Cryptexes/OS", insp.vfs_source)
+        self.assertIn("System/Cryptexes/App", insp.vfs_source)
+        self.assertIn("private/preboot/Cryptexes/App", insp.vfs_source)
+        self.assertIn("ndp->ni_pathlen = (u_int)new_len", insp.vfs_source)
+
+    def test_07_patch_0083_shared_region_trust_cache_bypass(self):
+        """Verify patch 0083 shared region trust cache and SIP bypass in vm_unix.c."""
+        insp = Patch0083Inspector.get_instance()
+        self.assertIn("ARM64_BOARD_CONFIG_SWEET", insp.vm_source)
+        self.assertIn("goto after_root_check;", insp.vm_source)
+        self.assertIn("csr_check(CSR_ALLOW_UNRESTRICTED_FS)", insp.raw_patch)
+        self.assertIn("scdir_path", insp.vm_source)
+        self.assertIn("/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld", insp.vm_source)
+        self.assertIn("on sweet/sargo, dyld cache mappings are accepted unconditionally", insp.vm_source)
 
 
 class TestTier1Feature11VersionControlCI(unittest.TestCase):
