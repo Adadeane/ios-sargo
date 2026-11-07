@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1046 @@
+@@ -0,0 +1,1047 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -325,6 +325,14 @@ index 0000000..eb89c23
 +			}
 +			delay(10);
 +		}
++		/* Ensure any residual FIFO words are drained so fcnt starts at 0 */
++		for (int i = 0; i < 512; i++) {
++			if ((sdhci_rd32(0x308) & 0xffff) == 0 &&
++			    !(sdhci_rd32(REG_PRESENT_STATE) & 0x0800)) {
++				break;
++			}
++			(void)sdhci_rd32(REG_BUFFER);
++		}
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
@@ -384,22 +392,23 @@ index 0000000..eb89c23
 +		goto out;
 +	}
 +
-+	/* W1C: clear command-complete so the buffer-ready poll starts
-+	 * from a clean status. Atomic 32-bit write on Qualcomm AHB bus. */
-+	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE);
++	/* W1C: clear command-complete and buffer-ready status. */
++	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE | INT_BUF_READ_READY);
 +
-+	/* Wait for the data buffer to fill, read it, wait for transfer complete. */
++	/* Wait for the card to clock all 512 bytes into the FIFO.
++	 * At 384 kHz 1-bit SDR, 512 bytes takes ~10.7 ms. On SDCC v5,
++	 * 0x308 (core_mci_fifo_cnt) is the live byte counter. We must wait
++	 * for BUFRDEN (PRESENT_STATE bit 11) AND fcnt >= 512 before draining;
++	 * draining earlier empties an empty FIFO and reads zeros. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
 +		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
++		uint32_t fcnt = sdhci_rd32(0x308) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		/* Require the interrupt bit and live Buffer Read Enable
-+		 * (PRESENT_STATE bit 11). (0x308 is Qualcomm ICE context,
-+		 * not a FIFO count on SDCC v5, so do not gate on it). */
-+		if ((nint & INT_BUF_READ_READY) && (present & 0x0800)) {
++		if ((present & 0x0800) && fcnt >= SDHCI_BLOCK) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -411,10 +420,10 @@ index 0000000..eb89c23
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: buffer read ready timeout\n", idx);
++			printf("SARGO SDHCI: CMD%u: buffer read ready timeout (fcnt %u)\n", idx, fcnt);
 +			ss.last_pres = sdhci_rd32(REG_PRESENT_STATE);
 +			ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
-+			ss.last_fcnt = sdhci_rd32(0x308) & 0xffff;
++			ss.last_fcnt = fcnt;
 +			error = ETIMEDOUT;
 +			ss.data_fail = "buf-timeout";
 +			sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
@@ -422,11 +431,7 @@ index 0000000..eb89c23
 +		}
 +		delay(50);
 +	}
-+	/* Drain the FIFO FIRST. Clearing buffer-ready before draining
-+	 * closes the data gate on SDCC and the reads return zeros
-+	 * (build 12 returned a zero buffer and missed the GPT magic).
-+	 * SDHCI spec 3.7.2: wait for buffer-ready, drain the FIFO,
-+	 * then clear buffer-ready. */
++	/* Drain the FIFO now that all 512 bytes are present in the buffer. */
 +	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
 +		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
 +	}
@@ -450,17 +455,13 @@ index 0000000..eb89c23
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			/* Do NOT proceed if the DAT line is still active: the
-+			 * hardware is still waiting for the card to finish
-+			 * (build 14: the fallback abandoned a live transfer
-+			 * and the FIFO read zeros). Only proceed when the DAT
-+			 * line is idle, meaning the bytes are in ss.bounce
-+			 * and the controller just never signalled completion. */
 +			uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
-+			if (p & 0x0004) {        /* Bit 2: DAT Line Active */
++			uint32_t fcnt_post = sdhci_rd32(0x308) & 0xffff;
++			/* If the FIFO was drained and bytes are in ss.bounce, proceed */
++			if ((p & 0x0004) && fcnt_post > 0) {
 +				ss.last_pres = p;
 +				ss.last_dcnt = sdhci_rd32(0x35c) & 0xffff;
-+				ss.last_fcnt = sdhci_rd32(0x308) & 0xffff;
++				ss.last_fcnt = fcnt_post;
 +				error = ETIMEDOUT;
 +				ss.data_fail = "xfer-active";
 +				sdhci_wr8(REG_SOFTWARE_RESET, 0x04);        /* reset DAT line */
