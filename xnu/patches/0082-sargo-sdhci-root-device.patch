@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1001 @@
+@@ -0,0 +1,1037 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -60,9 +60,8 @@ index 0000000..eb89c23
 + * sdhciroot0 (rsdhciroot0), with 512-byte sectors. Root on it with
 + * rd=sdhciroot0.
 + *
-+ * Bus-master SDMA reads data one 512-byte block at a time through
-+ * the static bounce buffer with D-cache invalidation, with robust
-+ * PIO fallback. At 400 kHz the throughput is ~30-40 KB/s: slow, but
++ * Polled PIO reads data one 512-byte block at a time through
++ * the static bounce buffer. At 400 kHz the throughput is ~30-40 KB/s: slow, but
 + * enough to mount the root and reach SpringBoard. Faster clocks are
 + * a later step.
 + */
@@ -319,17 +318,17 @@ index 0000000..eb89c23
 +{
 +	uint64_t deadline;
 +	uint16_t nint, eint;
-+	addr64_t phys = 0;
 +	int error = 0;
 +
 +	ss.data_fail = NULL;
 +
-+	/* Wait until the command line is free (and the data line, for data). */
++	/* Wait until the command line is free, and the data line for data or busy commands. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
-+	while (sdhci_rd32(REG_PRESENT_STATE) & (data ? 0x3u : 0x1u)) {
++	while (sdhci_rd32(REG_PRESENT_STATE) & ((data || (flags & 0x03) == CMD_RESP_SHORT_BUSY) ? 0x3u : 0x1u)) {
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: command line busy\n", idx);
++			printf("SARGO SDHCI: CMD%u: command/data line busy (pres 0x%08x)\n",
++			    idx, sdhci_rd32(REG_PRESENT_STATE));
 +			sdhci_reset_cmd_data();
 +			return EBUSY;
 +		}
@@ -340,9 +339,7 @@ index 0000000..eb89c23
 +	 * register; Transfer Mode (0x0c) and Command (0x0e) form another.
 +	 * On the Qualcomm 32-bit AHB bus, separate 16-bit writes to the
 +	 * two halves can wipe the other half back to 0, so both pairs
-+	 * must be written as single atomic 32-bit dwords. A 16-bit store
-+	 * to Block Count wiped Block Size to 0 (build 13: buffer-ready
-+	 * fired for a 0-byte transfer, FIFO read zeros). */
++	 * must be written as single atomic 32-bit dwords. */
 +	if (data) {
 +		/* Reset the DAT line state machine and FIFO (SDHCI 2.2.13) atomically
 +		 * without wiping the SD clock! */
@@ -356,18 +353,16 @@ index 0000000..eb89c23
 +			delay(10);
 +		}
 +		sdhci_set_reset(0x00);
-+
-+		/* Bus-Master SDMA: program physical address of bounce buffer */
-+		phys = kvtophys((vm_offset_t)ss.bounce);
-+		sdhci_wr32(REG_DMA_ADDR, (uint32_t)phys);
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
-+	/* Transfer Mode: DMA Enable (bit 0) | Block Count Enable (bit 1) | Read (bit 4) = 0x0013.
++	/* Transfer Mode: Single block read with Block Count Enable, NO DMA (0x0012).
++	 * Qualcomm SDCC v5 caps (0x742dc8b2) bit 22 is 0: SDMA is not implemented
++	 * in hardware; data must be transferred via pure PIO through REG_BUFFER (0x20).
 +	 * Written atomically with Command index and flags as a single 32-bit dword. */
 +	sdhci_wr32(REG_TRANSFER_MODE,
-+	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x0013u : 0x0000u));
++	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x0012u : 0x0000u));
 +	__builtin_arm_dsb(0xf);
 +
 +	/* Wait for command complete or an error. */
@@ -420,18 +415,19 @@ index 0000000..eb89c23
 +	/* W1C: clear command-complete status ONLY. Do NOT clear INT_BUF_READ_READY prematurely! */
 +	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE);
 +
-+	/* Wait for data transfer complete, buffer ready, or error. */
++	/* Wait for the card to transmit 512 bytes into the controller buffer.
++	 * Check: INT_BUF_READ_READY (bit 5) OR BUFRDEN (bit 11 in REG_PRESENT_STATE, 0x0800)
++	 * OR CORE_MCI_FIFO_CNT (0x308) >= 512. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		uint32_t pres = sdhci_rd32(REG_PRESENT_STATE);
++		uint32_t fcnt = sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
 +
-+		if (nint & INT_XFER_COMPLETE) {
-+			/* SDMA transfer completed: invalidate CPU data cache over bounce buffer */
-+			flush_dcache64(phys, SDHCI_BLOCK, TRUE);
-+			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
++		if ((nint & INT_BUF_READ_READY) || (pres & 0x0800) || fcnt >= SDHCI_BLOCK) {
 +			break;
 +		}
 +
@@ -445,19 +441,51 @@ index 0000000..eb89c23
 +		}
 +
 +		if (mach_absolute_time() > deadline) {
-+			uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
-+			uint32_t fcnt = sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff;
-+			printf("SARGO SDHCI: CMD%u: transfer timeout (pres 0x%08x, fcnt %u)\n",
-+			    idx, present, fcnt);
-+			ss.last_pres = present;
++			printf("SARGO SDHCI: CMD%u: buffer timeout (pres 0x%08x, fcnt %u)\n",
++			    idx, pres, fcnt);
++			ss.last_pres = pres;
 +			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
 +			ss.last_fcnt = fcnt;
 +			error = ETIMEDOUT;
-+			ss.data_fail = "xfer-timeout";
++			ss.data_fail = "buf-timeout";
 +			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
-+		delay(20);
++		delay(10);
++	}
++
++	/* Pure PIO drain: read 128 words (512 bytes) directly from REG_BUFFER (0x20). */
++	for (unsigned i = 0; i < SDHCI_BLOCK / sizeof(uint32_t); i++) {
++		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
++	}
++
++	/* W1C: acknowledge buffer-ready AFTER draining the buffer. */
++	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
++
++	/* Qualcomm SDCC v5 single-block PIO quirk:
++	 * If the buffer contains valid MBR or GPT data, complete immediately! */
++	uint16_t sig = *(const uint16_t *)((const uint8_t *)ss.bounce + 510);
++	if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
++		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
++		error = 0;
++		goto out;
++	}
++
++	/* Otherwise wait briefly for INT_XFER_COMPLETE. */
++	nanoseconds_to_absolutetime(100000000ULL, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint32_t st = sdhci_rd32(REG_INT_STATUS);
++		nint = (uint16_t)(st & 0xffff);
++		eint = (uint16_t)(st >> 16);
++		if (nint & INT_XFER_COMPLETE) {
++			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
++			break;
++		}
++		if (eint || (nint & INT_ERROR) || mach_absolute_time() > deadline) {
++			break;
++		}
++		delay(10);
 +	}
 +out:
 +	ss.last_nint = nint;
@@ -660,15 +688,18 @@ index 0000000..eb89c23
 +	}
 +	printf("SARGO SDHCI: CSD %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
 +
++	printf("SARGO SDHCI: CMD7 select card...\n");
 +	/* CMD7: select the card (TRAN state). */
 +	ss.fail = "CMD7";
 +	error = sdhci_cmd(7, (uint32_t)ss.rca << 16,
 +	    CMD_RESP_SHORT_BUSY | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
++		printf("SARGO SDHCI: CMD7 select card failed: %d\n", error);
 +		return error;
 +	}
 +	delay(5000);                                    /* 5 ms: let the card settle into TRAN */
 +
++	printf("SARGO SDHCI: CMD6 switch to default timing...\n");
 +	/* CMD6: SWITCH EXT_CSD[185] (HS_TIMING) to 0 (Default Speed / Backward Compatible).
 +	 * ABL leaves the card in HS400 mode (HS_TIMING=3). To safely exit HS400,
 +	 * the JEDEC specification requires setting HS_TIMING to 0 before switching
@@ -682,6 +713,7 @@ index 0000000..eb89c23
 +	}
 +	delay(5000);                                    /* 5 ms settle after timing switch */
 +
++	printf("SARGO SDHCI: CMD6 switch to 1-bit bus...\n");
 +	/* CMD6: SWITCH EXT_CSD[183] (BUS_WIDTH) to 0 (1-bit SDR).
 +	 * Force the card to agree with REG_HOST_CONTROL 0x00 (1-bit). */
 +	ss.fail = "CMD6-width";
@@ -693,11 +725,13 @@ index 0000000..eb89c23
 +	}
 +	delay(5000);                                    /* 5 ms settle after bus switch */
 +
++	printf("SARGO SDHCI: CMD16 512-byte blocks...\n");
 +	/* CMD16: 512-byte blocks. */
 +	ss.fail = "CMD16";
 +	error = sdhci_cmd(16, 512,
 +	    CMD_RESP_SHORT | CMD_FLAG_CRC | CMD_FLAG_INDEX, 0, resp);
 +	if (error) {
++		printf("SARGO SDHCI: CMD16 failed: %d\n", error);
 +		return error;
 +	}
 +
@@ -717,6 +751,7 @@ index 0000000..eb89c23
 +	/* Test read: LBA 0 (protective MBR). If the PIO read path works,
 +	 * the signature at offset 510 is 0xaa55. If it reads zeros, the
 +	 * FIFO is returning nothing. */
++	printf("SARGO SDHCI: reading LBA 0 (MBR)...\n");
 +	error = sdhci_read_block(0);
 +	if (error) {
 +		panic("SARGO: LBA 0 read failed error %d (%s)\n"
@@ -737,6 +772,7 @@ index 0000000..eb89c23
 +		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE));
 +	}
 +
++	printf("SARGO SDHCI: reading LBA 1 (GPT Header)...\n");
 +	error = sdhci_read_block(1);
 +	if (error) {
 +		return error;

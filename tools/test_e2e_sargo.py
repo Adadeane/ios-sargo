@@ -586,36 +586,30 @@ class TestTier1Feature4SDMADataTransport(unittest.TestCase):
         self.insp = Patch0082Inspector.get_instance()
 
     def test_01_reg_dma_addr_programming(self):
-        """Verify REG_DMA_ADDR (0x00) is programmed with kvtophys(ss.bounce) in patch 0082."""
+        """Verify REG_BUFFER (0x20) is defined and read for pure PIO data transport."""
         fn_body = self.insp.get_function_body("sdhci_cmd")
-        self.assertIn("phys = kvtophys((vm_offset_t)ss.bounce);", fn_body)
-        self.assertIn("sdhci_wr32(REG_DMA_ADDR, (uint32_t)phys);", fn_body)
-        phys = 0x80001000
-        self.hw.wr32(REG_DMA_ADDR, phys)
-        self.assertEqual(self.hw.rd32(REG_DMA_ADDR), phys)
+        self.assertIn("sdhci_rd32(REG_BUFFER)", fn_body)
+        self.assertIn("#define REG_BUFFER", self.insp.c_source)
+        self.assertIn("#define REG_DMA_ADDR", self.insp.c_source)
 
     def test_02_transfer_mode_0x0013(self):
-        """Verify Transfer Mode 0x0013 (DMA + Block Count + Read) is programmed in patch 0082."""
+        """Verify Transfer Mode 0x0012 (PIO + Block Count + Read, NO DMA) is programmed."""
         fn_body = self.insp.get_function_body("sdhci_cmd")
-        self.assertIn("data ? 0x0013u : 0x0000u", fn_body)
-        mode = 0x0013
+        self.assertIn("data ? 0x0012u : 0x0000u", fn_body)
+        mode = 0x0012
         dma_en = bool(mode & 0x0001)
         blk_cnt_en = bool(mode & 0x0002)
         read_dir = bool(mode & 0x0010)
-        self.assertTrue(dma_en)
+        self.assertFalse(dma_en, "SDMA must be disabled (caps bit 22 is 0 on SDCC v5)")
         self.assertTrue(blk_cnt_en)
         self.assertTrue(read_dir)
 
     def test_03_flush_dcache64_invocation(self):
-        """Verify flush_dcache64 invalidation is invoked on INT_XFER_COMPLETE in patch 0082."""
+        """Verify PIO drain reads 128 dwords from REG_BUFFER into bounce buffer."""
         fn_body = self.insp.get_function_body("sdhci_cmd")
-        xfer_pos = fn_body.find("if (nint & INT_XFER_COMPLETE)")
-        flush_pos = fn_body.find("flush_dcache64(phys, SDHCI_BLOCK, TRUE);", xfer_pos)
-        self.assertNotEqual(flush_pos, -1, "flush_dcache64 must be called when INT_XFER_COMPLETE is received")
-        phys = 0x80001000
-        self.mem.flush_dcache64(phys, SDHCI_BLOCK, True)
-        self.assertEqual(len(self.mem.dcache_flushed_ranges), 1)
-        self.assertEqual(self.mem.dcache_flushed_ranges[0], (phys, 512, True))
+        self.assertIn("for (unsigned i = 0; i < SDHCI_BLOCK / sizeof(uint32_t); i++)", fn_body)
+        self.assertIn("ss.bounce[i] = sdhci_rd32(REG_BUFFER);", fn_body)
+        self.assertIn("sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);", fn_body)
 
     def test_04_int_xfer_complete_polling(self):
         """Verify transfer completion asserts INT_XFER_COMPLETE and SDMA populates buffer."""

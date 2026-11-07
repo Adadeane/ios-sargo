@@ -7,4 +7,10 @@ research/
 shim/out/
 xnu/out/
 xnu/out-*/
+# local builds and templates
+out/
+shim-sargo/
+.agents/
+*.md
+!xnu/README.md
 __pycache__/
