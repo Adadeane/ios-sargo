@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1057 @@
+@@ -0,0 +1,1090 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -418,15 +418,19 @@ index 0000000..eb89c23
 +	/* W1C: clear command-complete and buffer-ready status. */
 +	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE | INT_BUF_READ_READY);
 +
-+	/* Wait for the card to clock data into the FIFO. */
++	/* Wait for the card to clock all 512 bytes into the FIFO.
++	 * Note: do NOT break on (present & 0x0800) alone! Qualcomm SDCC v5
++	 * asserts BUFRDEN (0x0800) constantly at idle, which causes premature
++	 * breakout at t=0 when the FIFO is still empty (fcnt == 0).
++	 * Wait until fcnt >= SDHCI_BLOCK or INT_BUF_READ_READY. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
-+		uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
++		uint32_t fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		if ((nint & INT_BUF_READ_READY) || (present & 0x0800)) {
++		if (fcnt >= SDHCI_BLOCK || (nint & INT_BUF_READ_READY)) {
 +			break;
 +		}
 +		if (eint || (nint & INT_ERROR)) {
@@ -438,11 +442,12 @@ index 0000000..eb89c23
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
-+			printf("SARGO SDHCI: CMD%u: buffer read ready timeout (pres 0x%08x)\n",
-+			    idx, present);
++			uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
++			printf("SARGO SDHCI: CMD%u: buffer timeout (pres 0x%08x, fcnt %u)\n",
++			    idx, present, fcnt);
 +			ss.last_pres = present;
 +			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
-+			ss.last_fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
++			ss.last_fcnt = fcnt;
 +			error = ETIMEDOUT;
 +			ss.data_fail = "buf-timeout";
 +			sdhci_set_reset(0x04);        /* reset DAT line */
@@ -468,20 +473,48 @@ index 0000000..eb89c23
 +	/* W1C: acknowledge buffer-ready AFTER draining. */
 +	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
 +
++	/* Check for valid boot sector signature 0xaa55, GPT header, or non-zero data.
++	 * If valid data was received, proceed immediately! Qualcomm SDCC v5 leaves
++	 * DAT Line Active asserted on single-block PIO transfers (SDHCI_QUIRK2_RDWR_TX_ACTIVE_EOT),
++	 * so waiting for transfer complete would result in a false timeout. */
++	uint16_t sig = (uint16_t)(ss.bounce[127] >> 16);
++	if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
++		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
++		error = 0;
++		goto out;
++	}
++
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
 +		uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
++		uint32_t fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
 +		if (nint & INT_XFER_COMPLETE) {
 +			break;
 +		}
-+		/* If valid boot sector signature 0xaa55, or GPT, or non-zero data, proceed */
-+		uint16_t sig = (uint16_t)(ss.bounce[127] >> 16);
++		sig = (uint16_t)(ss.bounce[127] >> 16);
 +		if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
 +			break;
++		}
++		if (fcnt >= SDHCI_BLOCK) {
++			for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
++			ss.bounce[i] = sdhci_rd32(REG_BUFFER);
++			}
++			if (ss.bounce[0] == 0 && ss.bounce[SDHCI_BLOCK / 4 - 1] == 0) {
++				for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
++					uint32_t w = sdhci_rd32(REG_MMCIFIFO);
++					if (w != 0) {
++						ss.bounce[i] = w;
++					}
++				}
++			}
++			sig = (uint16_t)(ss.bounce[127] >> 16);
++			if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
++				break;
++			}
 +		}
 +		if (eint || (nint & INT_ERROR)) {
 +			error = EIO;
@@ -492,6 +525,7 @@ index 0000000..eb89c23
 +			goto out;
 +		}
 +		if (mach_absolute_time() > deadline) {
++			sig = (uint16_t)(ss.bounce[127] >> 16);
 +			if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
 +				break;
 +			}
@@ -509,7 +543,6 @@ index 0000000..eb89c23
 +	if (sdhci_rd32(REG_INT_STATUS) & INT_XFER_COMPLETE) {
 +		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +	}
-+
 +out:
 +	ss.last_nint = nint;
 +	ss.last_eint = eint;
