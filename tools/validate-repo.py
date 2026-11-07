@@ -22,6 +22,81 @@ def red(text): return f"\033[91m{text}\033[0m"
 def bold(text): return f"\033[1m{text}\033[0m"
 
 
+def validate_patch_structure(path):
+    """Deep structural validation of a unified diff patch."""
+    errors = []
+    fname = os.path.basename(path)
+
+    # 1. Native Git unified diff syntax validation (git apply --stat)
+    try:
+        res = subprocess.run(
+            ['git', 'apply', '--stat', path],
+            capture_output=True, text=True, check=False
+        )
+        if res.returncode != 0:
+            errors.append(f"{fname}: git apply --stat rejected patch (code {res.returncode}): {res.stderr.strip()}")
+    except FileNotFoundError:
+        pass  # git not in PATH; fall back to internal python parser
+
+    # 2. Comprehensive Python-level unified diff validation
+    hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    with open(path, 'r', errors='replace') as f:
+        lines = f.readlines()
+
+    in_hunk = False
+    is_new_file = False
+    old_cnt = new_cnt = cur_old = cur_new = 0
+    hunk_line = 0
+
+    for idx, line in enumerate(lines, 1):
+        if line.startswith('--- /dev/null'):
+            is_new_file = True
+        elif line.startswith('--- ') and not line.startswith('--- /dev/null'):
+            is_new_file = False
+
+        if line.startswith('@@ '):
+            if in_hunk:
+                if cur_old != old_cnt or cur_new != new_cnt:
+                    errors.append(f"{fname}:{hunk_line}: hunk line count mismatch: expected -{old_cnt}/+{new_cnt}, found -{cur_old}/+{cur_new}")
+            m = hunk_re.match(line)
+            if not m:
+                errors.append(f"{fname}:{idx}: malformed hunk header: {line.strip()}")
+                in_hunk = False
+                continue
+            in_hunk = True
+            hunk_line = idx
+            old_cnt = int(m.group(2)) if m.group(2) is not None else 1
+            new_cnt = int(m.group(4)) if m.group(4) is not None else 1
+            cur_old = 0
+            cur_new = 0
+        elif in_hunk:
+            if line.startswith('diff ') or line.startswith('--- ') or line.startswith('Index:'):
+                if cur_old != old_cnt or cur_new != new_cnt:
+                    errors.append(f"{fname}:{hunk_line}: hunk line count mismatch: expected -{old_cnt}/+{new_cnt}, found -{cur_old}/+{cur_new}")
+                in_hunk = False
+            elif line.startswith('+'):
+                cur_new += 1
+            elif line.startswith('-'):
+                if is_new_file:
+                    errors.append(f"{fname}:{idx}: deletion line found in newly created file (/dev/null)")
+                cur_old += 1
+            elif line.startswith(' '):
+                if is_new_file:
+                    errors.append(f"{fname}:{idx}: context line found in newly created file (/dev/null)")
+                cur_old += 1
+                cur_new += 1
+            elif line.startswith('\\ No newline at end of file'):
+                pass
+            else:
+                errors.append(f"{fname}:{idx}: invalid diff line prefix {repr(line[:20])}")
+
+    if in_hunk:
+        if cur_old != old_cnt or cur_new != new_cnt:
+            errors.append(f"{fname}:{hunk_line}: hunk line count mismatch: expected -{old_cnt}/+{new_cnt}, found -{cur_old}/+{cur_new}")
+
+    return errors
+
+
 def validate_patches(verbose=False):
     patch_dir = os.path.join(REPO_ROOT, 'xnu/patches')
     patch_files = sorted(glob.glob(os.path.join(patch_dir, '*.patch')))
@@ -49,10 +124,11 @@ def validate_patches(verbose=False):
             errors.append(f"Patch is empty: {fname}")
             continue
 
-        with open(path, 'r', errors='ignore') as f:
-            head = f.read(2048)
-            if not ('--- ' in head or 'diff ' in head or 'Index:' in head):
-                errors.append(f"Patch missing standard diff header: {fname}")
+        struct_errors = validate_patch_structure(path)
+        if struct_errors:
+            errors.extend(struct_errors)
+        elif verbose:
+            print(f"    [OK] {fname}")
 
     # Check contiguous sequence
     if seen_numbers:

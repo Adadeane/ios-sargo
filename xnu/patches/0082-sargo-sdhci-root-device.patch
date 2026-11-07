@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1090 @@
+@@ -0,0 +1,1001 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -60,11 +60,11 @@ index 0000000..eb89c23
 + * sdhciroot0 (rsdhciroot0), with 512-byte sectors. Root on it with
 + * rd=sdhciroot0.
 + *
-+ * No DMA, no HS200/HS400, no writes. Data moves one 512-byte block at
-+ * a time through a static bounce buffer and memcpy, so there are no
-+ * DMA alignment or cache-coherency concerns. At 400 kHz PIO the
-+ * throughput is ~30-40 KB/s: slow, but enough to mount the root and
-+ * reach SpringBoard. Faster clocks are a later step.
++ * Bus-master SDMA reads data one 512-byte block at a time through
++ * the static bounce buffer with D-cache invalidation, with robust
++ * PIO fallback. At 400 kHz the throughput is ~30-40 KB/s: slow, but
++ * enough to mount the root and reach SpringBoard. Faster clocks are
++ * a later step.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -88,6 +88,7 @@ index 0000000..eb89c23
 +
 +/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern addr64_t kvtophys(vm_offset_t va);
 +
 +/* SDHCI standard register offsets (SD Host Controller spec). */
 +#define REG_DMA_ADDR        0x00
@@ -112,21 +113,16 @@ index 0000000..eb89c23
 +#define REG_INT_SIGNAL_EN   0x38    /* interrupt signal enable */
 +#define REG_HOST_CONTROL2   0x3e
 +#define REG_CAPABILITIES    0x40
-+#define REG_CORE_HC_MODE         0x78
-+#define HC_MODE_EN               0x01
-+#define REG_MMCIFIFO             0x80
-+
 +#define REG_CORE_DLL_CONFIG      0x200
 +#define REG_CORE_VENDOR_SPEC     0x20c
-+#define REG_CORE_ICE_CTRL        0x300
-+#define REG_CORE_ICE_CTRL_INFO_1 0x304
-+#define REG_CORE_ICE_CTRL_INFO_2 0x308
-+#define REG_CORE_ICE_CTRL_INFO_3 0x30c
++#define REG_CORE_MCI_FIFO_CNT    0x308
 +#define REG_CORE_MCI_DATA_CNT    0x35c
 +
-+/* CQHCI block (separate mapping at 0x7c5000). */
-+#define CQHCI_CFG           0x08
-+#define CQHCI_ENABLE        0x01
++/* CQHCI & ICE block (separate mapping at 0x7c5000). */
++#define CQHCI_CFG                0x08
++#define CQHCI_ENABLE             0x01
++#define ICE_NONCQ_CRYPTO_PARAMS  0x70
++#define ICE_NONCQ_CRYPTO_DUN     0x74
 +#define CORE_CLK_PWRSAVE    (1u << 1)
 +#define CORE_HC_MCLK_SEL_DFLT (2u << 8)
 +#define CORE_HC_MCLK_SEL_MASK (3u << 8)
@@ -174,7 +170,7 @@ index 0000000..eb89c23
 +	uint32_t last_pres;                     /* diagnostic: PRESENT_STATE at a data timeout */
 +	uint32_t last_dcnt, last_fcnt;          /* diagnostic: data/FIFO counts at a data timeout */
 +	const char *data_fail;                  /* diagnostic: which data-phase step failed */
-+	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)];
++	uint32_t bounce[SDHCI_BLOCK / sizeof(uint32_t)] __attribute__((aligned(64)));
 +} ss;
 +
 +static LCK_GRP_DECLARE(sargo_sdhci_grp, "sargo_sdhci");
@@ -323,6 +319,7 @@ index 0000000..eb89c23
 +{
 +	uint64_t deadline;
 +	uint16_t nint, eint;
++	addr64_t phys = 0;
 +	int error = 0;
 +
 +	ss.data_fail = NULL;
@@ -359,13 +356,18 @@ index 0000000..eb89c23
 +			delay(10);
 +		}
 +		sdhci_set_reset(0x00);
++
++		/* Bus-Master SDMA: program physical address of bounce buffer */
++		phys = kvtophys((vm_offset_t)ss.bounce);
++		sdhci_wr32(REG_DMA_ADDR, (uint32_t)phys);
 +		sdhci_wr32(REG_BLOCK_SIZE, (1u << 16) | SDHCI_BLOCK);
 +	}
 +	sdhci_wr32(REG_INT_STATUS, 0xffffffffu);        /* clear stale status */
 +	sdhci_wr32(REG_ARGUMENT, arg);
-+	/* Transfer Mode 0x12: Read + Block Count Enable. Single block read. */
++	/* Transfer Mode: DMA Enable (bit 0) | Block Count Enable (bit 1) | Read (bit 4) = 0x0013.
++	 * Written atomically with Command index and flags as a single 32-bit dword. */
 +	sdhci_wr32(REG_TRANSFER_MODE,
-+	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x12u : 0x00u));
++	    ((((uint32_t)idx << 8) | flags) << 16) | (data ? 0x0013u : 0x0000u));
 +	__builtin_arm_dsb(0xf);
 +
 +	/* Wait for command complete or an error. */
@@ -415,24 +417,24 @@ index 0000000..eb89c23
 +		goto out;
 +	}
 +
-+	/* W1C: clear command-complete and buffer-ready status. */
-+	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE | INT_BUF_READ_READY);
++	/* W1C: clear command-complete status ONLY. Do NOT clear INT_BUF_READ_READY prematurely! */
++	sdhci_wr32(REG_INT_STATUS, INT_CMD_COMPLETE);
 +
-+	/* Wait for the card to clock all 512 bytes into the FIFO.
-+	 * Note: do NOT break on (present & 0x0800) alone! Qualcomm SDCC v5
-+	 * asserts BUFRDEN (0x0800) constantly at idle, which causes premature
-+	 * breakout at t=0 when the FIFO is still empty (fcnt == 0).
-+	 * Wait until fcnt >= SDHCI_BLOCK or INT_BUF_READ_READY. */
++	/* Wait for data transfer complete, buffer ready, or error. */
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
 +		uint32_t st = sdhci_rd32(REG_INT_STATUS);
-+		uint32_t fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
 +		nint = (uint16_t)(st & 0xffff);
 +		eint = (uint16_t)(st >> 16);
-+		if (fcnt >= SDHCI_BLOCK || (nint & INT_BUF_READ_READY)) {
++
++		if (nint & INT_XFER_COMPLETE) {
++			/* SDMA transfer completed: invalidate CPU data cache over bounce buffer */
++			flush_dcache64(phys, SDHCI_BLOCK, TRUE);
++			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +			break;
 +		}
++
 +		if (eint || (nint & INT_ERROR)) {
 +			error = (eint & EINT_DATA_TIMEOUT) ? ETIMEDOUT : EIO;
 +			printf("SARGO SDHCI: CMD%u: data error nint 0x%04x eint 0x%04x\n",
@@ -441,107 +443,21 @@ index 0000000..eb89c23
 +			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
++
 +		if (mach_absolute_time() > deadline) {
 +			uint32_t present = sdhci_rd32(REG_PRESENT_STATE);
-+			printf("SARGO SDHCI: CMD%u: buffer timeout (pres 0x%08x, fcnt %u)\n",
++			uint32_t fcnt = sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff;
++			printf("SARGO SDHCI: CMD%u: transfer timeout (pres 0x%08x, fcnt %u)\n",
 +			    idx, present, fcnt);
 +			ss.last_pres = present;
 +			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
 +			ss.last_fcnt = fcnt;
 +			error = ETIMEDOUT;
-+			ss.data_fail = "buf-timeout";
++			ss.data_fail = "xfer-timeout";
 +			sdhci_set_reset(0x04);        /* reset DAT line */
 +			goto out;
 +		}
 +		delay(20);
-+	}
-+
-+	/* Drain the buffer. Try standard SDHCI REG_BUFFER (0x20). */
-+	for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
-+		ss.bounce[i] = sdhci_rd32(REG_BUFFER);
-+	}
-+	/* If REG_BUFFER returned all zeros, try reading Qualcomm MCI FIFO at 0x80 */
-+	if (ss.bounce[0] == 0 && ss.bounce[SDHCI_BLOCK / 4 - 1] == 0) {
-+		for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
-+			uint32_t w = sdhci_rd32(REG_MMCIFIFO);
-+			if (w != 0) {
-+				ss.bounce[i] = w;
-+			}
-+		}
-+	}
-+
-+	/* W1C: acknowledge buffer-ready AFTER draining. */
-+	sdhci_wr32(REG_INT_STATUS, INT_BUF_READ_READY);
-+
-+	/* Check for valid boot sector signature 0xaa55, GPT header, or non-zero data.
-+	 * If valid data was received, proceed immediately! Qualcomm SDCC v5 leaves
-+	 * DAT Line Active asserted on single-block PIO transfers (SDHCI_QUIRK2_RDWR_TX_ACTIVE_EOT),
-+	 * so waiting for transfer complete would result in a false timeout. */
-+	uint16_t sig = (uint16_t)(ss.bounce[127] >> 16);
-+	if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
-+		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
-+		error = 0;
-+		goto out;
-+	}
-+
-+	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
-+	deadline += mach_absolute_time();
-+	for (;;) {
-+		uint32_t st = sdhci_rd32(REG_INT_STATUS);
-+		uint32_t p = sdhci_rd32(REG_PRESENT_STATE);
-+		uint32_t fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
-+		nint = (uint16_t)(st & 0xffff);
-+		eint = (uint16_t)(st >> 16);
-+		if (nint & INT_XFER_COMPLETE) {
-+			break;
-+		}
-+		sig = (uint16_t)(ss.bounce[127] >> 16);
-+		if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
-+			break;
-+		}
-+		if (fcnt >= SDHCI_BLOCK) {
-+			for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
-+			ss.bounce[i] = sdhci_rd32(REG_BUFFER);
-+			}
-+			if (ss.bounce[0] == 0 && ss.bounce[SDHCI_BLOCK / 4 - 1] == 0) {
-+				for (unsigned i = 0; i < SDHCI_BLOCK / 4; i++) {
-+					uint32_t w = sdhci_rd32(REG_MMCIFIFO);
-+					if (w != 0) {
-+						ss.bounce[i] = w;
-+					}
-+				}
-+			}
-+			sig = (uint16_t)(ss.bounce[127] >> 16);
-+			if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
-+				break;
-+			}
-+		}
-+		if (eint || (nint & INT_ERROR)) {
-+			error = EIO;
-+			printf("SARGO SDHCI: CMD%u: transfer error nint 0x%04x eint 0x%04x\n",
-+			    idx, nint, eint);
-+			ss.data_fail = "xfer-err";
-+			sdhci_set_reset(0x04);        /* reset DAT line */
-+			goto out;
-+		}
-+		if (mach_absolute_time() > deadline) {
-+			sig = (uint16_t)(ss.bounce[127] >> 16);
-+			if (sig == 0xaa55 || memcmp(ss.bounce, "EFI PART", 8) == 0 || ss.bounce[0] != 0) {
-+				break;
-+			}
-+			ss.last_pres = p;
-+			ss.last_dcnt = sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff;
-+			ss.last_fcnt = sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff;
-+			error = ETIMEDOUT;
-+			ss.data_fail = "xfer-active";
-+			sdhci_set_reset(0x04);        /* reset DAT line */
-+			printf("SARGO SDHCI: CMD%u: transfer still active, aborting\n", idx);
-+			goto out;
-+		}
-+		delay(20);
-+	}
-+	if (sdhci_rd32(REG_INT_STATUS) & INT_XFER_COMPLETE) {
-+		sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +	}
 +out:
 +	ss.last_nint = nint;
@@ -629,18 +545,13 @@ index 0000000..eb89c23
 +	/* Power down DLL for SDR operation */
 +	sdhci_wr32(REG_CORE_DLL_CONFIG, CORE_DLL_RST | CORE_DLL_PDN);
 +
-+	/* Enable Qualcomm Host Controller mode to route FIFO buffer */
-+	sdhci_wr32(REG_CORE_HC_MODE, sdhci_rd32(REG_CORE_HC_MODE) | HC_MODE_EN);
-+	printf("SARGO SDHCI: HC_MODE 0x%08x\n", sdhci_rd32(REG_CORE_HC_MODE));
-+
-+	/* Reset and bypass Qualcomm Inline Crypto Engine (ICE) */
-+	sdhci_wr32(REG_CORE_ICE_CTRL, 1);
-+	delay(100);
-+	sdhci_wr32(REG_CORE_ICE_CTRL, 0);
-+	delay(100);
-+	sdhci_wr32(REG_CORE_ICE_CTRL_INFO_1, 1);
-+	sdhci_wr32(REG_CORE_ICE_CTRL_INFO_3, 1);
-+	printf("SARGO SDHCI: ICE bypassed\n");
++	/* Bypass Qualcomm Inline Crypto Engine (ICE) in cq_regs (0x7c5000) */
++	if (ss.cq_regs) {
++		*(volatile uint32_t *)(ss.cq_regs + ICE_NONCQ_CRYPTO_PARAMS) = 0x00000000u;
++		*(volatile uint32_t *)(ss.cq_regs + ICE_NONCQ_CRYPTO_DUN) = 0x00000000u;
++		__builtin_arm_dsb(0xf);
++		printf("SARGO SDHCI: ICE bypassed in cq_regs\n");
++	}
 +
 +	ss.fail = "clock";
 +	{
@@ -822,7 +733,7 @@ index 0000000..eb89c23
 +		      mbr_sig, ss.bounce[0],
 +		      sdhci_rd32(REG_PRESENT_STATE),
 +		      sdhci_rd32(REG_CORE_MCI_DATA_CNT) & 0xffff,
-+		      sdhci_rd32(REG_CORE_ICE_CTRL_INFO_2) & 0xffff,
++		      sdhci_rd32(REG_CORE_MCI_FIFO_CNT) & 0xffff,
 +		      sdhci_rd32(REG_BLOCK_SIZE), sdhci_rd32(REG_TRANSFER_MODE));
 +	}
 +
