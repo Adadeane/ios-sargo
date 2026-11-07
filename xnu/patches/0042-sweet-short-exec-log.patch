@@ -1,6 +1,17 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7411,9 +7411,14 @@
+@@ -7400,7 +7400,9 @@ process_signature(proc_t p, struct image_params *imgp)
+ 		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
+ 		if (psa == NULL || psa->psa_platform == 0) {
+ 			boolean_t no_sandbox_entitled = FALSE;
+-#if DEBUG || DEVELOPMENT
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			no_sandbox_entitled = TRUE;
++#elif DEBUG || DEVELOPMENT
+ 			/*
+ 			 * Allow iOS binaries to spawn on internal systems
+ 			 * if no-sandbox entitlement is present of unentitled_ios_sim_launch
+@@ -7419,15 +7421,22 @@ process_signature(proc_t p, struct image_params *imgp)
  				error = EACCES;
  				goto done;
  			}
@@ -13,5 +24,13 @@
  			    "boot-arg set to true\n", p->p_name);
 +#endif
  		} else if (psa->psa_platform != PLATFORM_IOS) {
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
  			/* Simulator binary spawned with wrong platform */
  			signature_failure_reason = os_reason_create(OS_REASON_EXEC,
+ 			    EXEC_EXIT_REASON_WRONG_PLATFORM);
+ 			error = EACCES;
+ 			goto done;
++#endif
+ 		} else {
+ 			printf("Allowing spawn of iOS binary %s since correct platform was passed in spawn\n",
+ 			    p->p_name);

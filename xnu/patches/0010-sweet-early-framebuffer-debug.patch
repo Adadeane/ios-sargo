@@ -19,9 +19,48 @@ index e26a1d7..e3579f1 100644
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -362,6 +365,7 @@ arm_init(
+@@ -362,6 +365,46 @@ arm_init(
  #endif /* defined(HAS_APPLE_PAC) */
  
++#if defined(SWEET) || defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		static const char *const s_req_args[] = {
++			"unentitled_ios_sim_launch=1",
++			"ignition_level=1",
++			"wdt_test=no_user_checkin",
++			"rootrw=1",
++			"launchd_unsecure_cache=1",
++			"wdt=-1"
++		};
++		for (unsigned int i = 0; i < sizeof(s_req_args) / sizeof(s_req_args[0]); i++) {
++			char key[32];
++			unsigned int k = 0;
++			while (s_req_args[i][k] && s_req_args[i][k] != '=' && k < sizeof(key) - 1) {
++				key[k] = s_req_args[i][k];
++				k++;
++			}
++			key[k] = '\0';
++			const char *found = NULL;
++			size_t klen = strlen(key);
++			for (const char *p = args->command_line; *p; p++) {
++				if ((p == args->command_line || *(p - 1) == ' ') &&
++				    strncmp(p, key, klen) == 0 &&
++				    (p[klen] == '=' || p[klen] == ' ' || p[klen] == '\0')) {
++					found = p;
++					break;
++				}
++			}
++			if (!found) {
++				size_t cur = strlen(args->command_line);
++				size_t add = strlen(s_req_args[i]);
++				if (cur + add + 2 < sizeof(args->command_line)) {
++					args->command_line[cur] = ' ';
++					memcpy(&args->command_line[cur + 1], s_req_args[i], add + 1);
++				}
++			}
++		}
++	}
++#endif
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
 +	sweet_early_mark(2, "PE_init_platform done");
  

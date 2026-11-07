@@ -916,6 +916,31 @@ class TestTier1Feature9PreemptiveBootAudit(unittest.TestCase):
         self.assertIn("wdt=-1", CANONICAL_BOOT_ARGS)
         self.assertIn("wdt_test=no_user_checkin", CANONICAL_BOOT_ARGS)
 
+    def test_06_patch_0042_alien_platform_bypass(self):
+        """Verify patch 0042 unconditionally permits iOS binaries on Sweet/Sargo."""
+        patch_path = os.path.join(REPO_ROOT, "xnu/patches/0042-sweet-short-exec-log.patch")
+        with open(patch_path, "r") as f:
+            content = f.read()
+        self.assertIn("no_sandbox_entitled = TRUE;", content)
+        self.assertIn("ARM64_BOARD_CONFIG_SWEET", content)
+
+    def test_07_patch_0010_boot_args_injection(self):
+        """Verify patch 0010 auto-injects essential tokens into args->command_line."""
+        patch_path = os.path.join(REPO_ROOT, "xnu/patches/0010-sweet-early-framebuffer-debug.patch")
+        with open(patch_path, "r") as f:
+            content = f.read()
+        self.assertIn("unentitled_ios_sim_launch=1", content)
+        self.assertIn("ignition_level=1", content)
+        self.assertIn("launchd_unsecure_cache=1", content)
+
+    def test_08_mkpayload_essential_tokens_auto_append(self):
+        """Verify tools/mkpayload.py automatically appends missing essential tokens."""
+        mkpayload_path = os.path.join(REPO_ROOT, "tools/mkpayload.py")
+        with open(mkpayload_path, "r") as f:
+            content = f.read()
+        self.assertIn("essential_tokens", content)
+        self.assertIn("CANONICAL_BOOT_ARGS", content)
+
 
 class TestTier1Feature10RepoValidation(unittest.TestCase):
     """Feature 10: Repo Validation."""

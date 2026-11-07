@@ -140,7 +140,25 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
+CANONICAL_BOOT_ARGS = (
+    "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress "
+    "rd=sdhciroot0 sdhciroot=userdata unentitled_ios_sim_launch=1 ignition_level=1 "
+    "wdt_test=no_user_checkin rootrw=1 launchd_unsecure_cache=1 wdt=-1"
+)
+
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+    essential_tokens = [
+        "unentitled_ios_sim_launch=1",
+        "ignition_level=1",
+        "wdt_test=no_user_checkin",
+        "rootrw=1",
+        "launchd_unsecure_cache=1",
+        "wdt=-1",
+    ]
+    for tok in essential_tokens:
+        k = tok.split("=")[0]
+        if k not in cmdline:
+            cmdline = cmdline + " " + tok
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -196,7 +214,7 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
-    ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
+    ap.add_argument('--cmdline', default=CANONICAL_BOOT_ARGS)
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
     a = ap.parse_args()
     blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
