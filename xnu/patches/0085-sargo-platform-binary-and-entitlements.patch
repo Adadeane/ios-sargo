@@ -1,0 +1,103 @@
+diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -291,6 +291,17 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+ 		retval = 1;
+ 		proc_csflags_update(p, flags);
+ 	} else {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if ((flags & CS_PLATFORM_BINARY) == 0 && (flags & CS_VALID)) {
++			flags &= ~CS_VALID;
++			cs_procs_invalidated++;
++			verbose = 1;
++			proc_csflags_update(p, flags);
++			cs_process_invalidated(NULL);
++		} else {
++			proc_csflags_update(p, flags);
++		}
++#else
+ 		if (flags & CS_VALID) {
+ 			flags &= ~CS_VALID;
+ 			cs_procs_invalidated++;
+@@ -300,6 +311,7 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+ 		} else {
+ 			proc_csflags_update(p, flags);
+ 		}
++#endif
+ 	}
+ 	proc_unlock(p);
+ 
+diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7421,8 +7421,10 @@ process_signature(proc_t p, struct image_params *imgp)
+ 				error = EACCES;
+ 				goto done;
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+-			/* SWEET runs every iOS binary this way: one short line per exec. */
++			/* SWEET runs every iOS binary as a platform binary: one short line per exec. */
++			imgp->ip_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;
++			p->p_csflags |= CS_SIGNED | CS_PLATFORM_BINARY;
+ 			printf("exec %s\n", p->p_name);
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
+diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -167,12 +167,45 @@ sweet_amfi_adjust_without_monitor(__unused void *os_entitlements,
+ static kern_return_t
+ sweet_amfi_query_boolean(const void *os_entitlements, const char *entitlement_name)
+ {
+-	return sweet_entitlements_bool(os_entitlements, entitlement_name) ? KERN_SUCCESS : KERN_DENIED;
++	if (os_entitlements != NULL && sweet_entitlements_bool(os_entitlements, entitlement_name)) {
++		return KERN_SUCCESS;
++	}
++	if (entitlement_name != NULL) {
++		if (strcmp(entitlement_name, "platform-application") == 0 ||
++		    strcmp(entitlement_name, "com.apple.private.security.storage.AppContainer") == 0 ||
++		    strcmp(entitlement_name, "com.apple.private.security.storage.SystemContainers") == 0 ||
++		    strcmp(entitlement_name, "com.apple.private.security.system-group-containers") == 0 ||
++		    strcmp(entitlement_name, "com.apple.security.system-group-containers") == 0 ||
++		    strcmp(entitlement_name, "com.apple.springboard") == 0 ||
++		    strcmp(entitlement_name, "com.apple.springboard.ui") == 0 ||
++		    strcmp(entitlement_name, "com.apple.backboardd") == 0 ||
++		    strcmp(entitlement_name, "com.apple.runningboard.assertions.survive-death") == 0 ||
++		    strcmp(entitlement_name, "com.apple.private.hid.client.service-protected") == 0) {
++			return KERN_SUCCESS;
++		}
++	}
++	return KERN_DENIED;
+ }
+ 
+ static kern_return_t
+ sweet_amfi_query_boolean_with_proc(const proc_t proc, const char *entitlement_name)
+ {
++	if (proc != NULL && csproc_get_platform_binary(proc)) {
++		if (entitlement_name != NULL) {
++			if (strcmp(entitlement_name, "platform-application") == 0 ||
++			    strcmp(entitlement_name, "com.apple.private.security.storage.AppContainer") == 0 ||
++			    strcmp(entitlement_name, "com.apple.private.security.storage.SystemContainers") == 0 ||
++			    strcmp(entitlement_name, "com.apple.private.security.system-group-containers") == 0 ||
++			    strcmp(entitlement_name, "com.apple.security.system-group-containers") == 0 ||
++			    strcmp(entitlement_name, "com.apple.springboard") == 0 ||
++			    strcmp(entitlement_name, "com.apple.springboard.ui") == 0 ||
++			    strcmp(entitlement_name, "com.apple.backboardd") == 0 ||
++			    strcmp(entitlement_name, "com.apple.runningboard.assertions.survive-death") == 0 ||
++			    strcmp(entitlement_name, "com.apple.private.hid.client.service-protected") == 0) {
++				return KERN_SUCCESS;
++			}
++		}
++	}
+ 	return sweet_amfi_query_boolean(sweet_proc_entitlements(proc), entitlement_name);
+ }
+ 
+@@ -262,7 +295,7 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+     __unused char **fatal_failure_desc, __unused size_t *fatal_failure_desc_len)
+ {
+ 	mount_t mp = vnode_mount(vp);
+-	*cs_flags |= CS_SIGNED;
++	*cs_flags |= CS_SIGNED | CS_PLATFORM_BINARY;
+ 	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
+ 		*cs_flags |= CS_PLATFORM_BINARY;
+ 	}
