@@ -136,3 +136,21 @@ diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
  	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
  		*cs_flags |= CS_PLATFORM_BINARY;
  	}
+diff -Naur a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -311,6 +311,14 @@
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
++	static int noswap = -1;
++	if (noswap < 0) {
++		noswap = 0;
++		PE_parse_boot_argn("sweetfb_noswap", &noswap, sizeof(noswap));
++	}
++	if (noswap != 0) {
++		return;
++	}
+ 	uint32_t mask = get32(rec, 0x104);
+  
+ 

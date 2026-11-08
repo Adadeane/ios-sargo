@@ -306,6 +306,7 @@ class Patch0085Inspector:
         self.exec_source = self.hunk_files.get("bsd/kern/kern_exec.c", "")
         self.proc_source = self.hunk_files.get("bsd/kern/kern_proc.c", "")
         self.amfi_source = self.hunk_files.get("bsd/kern/sweet_amfi.c", "")
+        self.fb_source = self.hunk_files.get("iokit/Kernel/arm/SweetFramebuffer.cpp", "")
 
     def _read_patch(self):
         if not os.path.exists(self.patch_path):
@@ -1230,6 +1231,7 @@ class TestTier1Feature10RepoValidation(unittest.TestCase):
         self.assertIn("csproc_get_platform_binary", insp.cs_source)
         self.assertIn("csblob_get_platform_binary", insp.cs_source)
         self.assertIn("retflags |= CS_SIGNED | CS_PLATFORM_BINARY | CS_VALID;", insp.proc_source)
+        self.assertIn("sweetfb_noswap", insp.fb_source)
 
 
 class TestTier1Feature11VersionControlCI(unittest.TestCase):
