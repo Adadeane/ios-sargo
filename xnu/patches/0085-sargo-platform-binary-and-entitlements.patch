@@ -1,7 +1,7 @@
 diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
 --- a/bsd/kern/kern_cs.c
 +++ b/bsd/kern/kern_cs.c
-@@ -291,6 +291,10 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+@@ -284,6 +284,10 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
  		retval = 1;
  		proc_csflags_update(p, flags);
  	} else {
@@ -12,14 +12,15 @@ diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
  		if (flags & CS_VALID) {
  			flags &= ~CS_VALID;
  			cs_procs_invalidated++;
-@@ -300,5 +304,6 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
+@@ -293,6 +297,7 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
  		} else {
  			proc_csflags_update(p, flags);
  		}
 +#endif
  	}
  	proc_unlock(p);
-@@ -492,8 +497,12 @@
+ 
+@@ -485,10 +490,14 @@ csblob_get_addr(struct cs_blob *blob)
  int
  csblob_get_platform_binary(struct cs_blob *blob)
  {
@@ -32,7 +33,9 @@ diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
  	return 0;
 +#endif
  }
-@@ -871,11 +880,15 @@
+ 
+ /*
+@@ -869,6 +878,9 @@ csvnode_get_teamid(struct vnode *vp, off_t offset)
  int
  csproc_get_platform_binary(struct proc *p)
  {
@@ -42,17 +45,18 @@ diff -Naur a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
  	struct cs_blob *csblob;
  
  	csblob = csproc_get_blob(p);
- 
+@@ -876,6 +888,7 @@ csproc_get_platform_binary(struct proc *p)
  	/* If there is no csblob this returns 0 because
  	 *  it is true that it is not a platform binary */
  	return (csblob == NULL) ? 0 : csblob->csb_platform_binary;
 +#endif
  }
+ 
+ int
 diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7421,8 +7421,9 @@ process_signature(proc_t p, struct image_params *imgp)
- 				error = EACCES;
+@@ -7414,7 +7414,8 @@ process_signature(proc_t p, struct image_params *imgp)
  				goto done;
  			}
  #if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -65,9 +69,7 @@ diff -Naur a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff -Naur a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
 --- a/bsd/kern/kern_proc.c
 +++ b/bsd/kern/kern_proc.c
-@@ -3261,8 +3261,11 @@
- 	case CS_OPS_STATUS: {
- 		uint32_t retflags;
+@@ -3207,6 +3207,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
  
  		proc_lock(pt);
  		retflags = (uint32_t)proc_getcsflags(pt);
@@ -80,7 +82,7 @@ diff -Naur a/bsd/kern/kern_proc.c b/bsd/kern/kern_proc.c
 diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
 --- a/bsd/kern/sweet_amfi.c
 +++ b/bsd/kern/sweet_amfi.c
-@@ -167,12 +167,45 @@ sweet_amfi_adjust_without_monitor(__unused void *os_entitlements,
+@@ -168,12 +168,45 @@ sweet_amfi_adjust_without_monitor(__unused void *os_entitlements,
  static kern_return_t
  sweet_amfi_query_boolean(const void *os_entitlements, const char *entitlement_name)
  {
@@ -127,7 +129,7 @@ diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
  	return sweet_amfi_query_boolean(sweet_proc_entitlements(proc), entitlement_name);
  }
  
-@@ -262,7 +295,7 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+@@ -263,7 +296,7 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
      __unused char **fatal_failure_desc, __unused size_t *fatal_failure_desc_len)
  {
  	mount_t mp = vnode_mount(vp);
@@ -139,7 +141,7 @@ diff -Naur a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
 diff -Naur a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -311,6 +311,14 @@
+@@ -311,6 +311,14 @@ AppleCLCD::swap(const uint8_t *rec)
  void
  AppleCLCD::present(const uint8_t *rec)
  {
@@ -152,5 +154,5 @@ diff -Naur a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		return;
 +	}
  	uint32_t mask = get32(rec, 0x104);
-  
+ 
  
