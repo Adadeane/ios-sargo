@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1066 @@
+@@ -0,0 +1,1083 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -90,6 +90,19 @@ index 0000000..eb89c23
 +extern addr64_t kvtophys(vm_offset_t va);
 +extern void sweet_sample_start(void);
 +
++static inline void
++sargo_clean_dcache(vm_offset_t va, vm_size_t size)
++{
++	vm_offset_t line = va & ~63ULL;
++	vm_offset_t end = (va + size + 63ULL) & ~63ULL;
++	__asm__ volatile("dmb sy" ::: "memory");
++	while (line < end) {
++		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
++		line += 64;
++	}
++	__asm__ volatile("dsb sy; isb" ::: "memory");
++}
+++
 +/* SDHCI standard register offsets (SD Host Controller spec). */
 +#define REG_DMA_ADDR        0x00
 +#define REG_BLOCK_SIZE      0x04
@@ -395,6 +408,8 @@ index 0000000..eb89c23
 +		/* Flush descriptor to RAM and clean/invalidate bounce buffer */
 +		flush_dcache64(desc_phys, sizeof(ss_adma), TRUE);
 +		flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
++		sargo_clean_dcache((vm_offset_t)ss_adma, sizeof(ss_adma));
++		sargo_clean_dcache((vm_offset_t)ss.bounce, SDHCI_BLOCK);
 +
 +		/* Program 64-bit ADMA descriptor table pointer */
 +		sdhci_wr32(REG_ADMA_ADDR_LO, (uint32_t)(desc_phys & 0xffffffffu));
@@ -470,6 +485,7 @@ index 0000000..eb89c23
 +			/* ADMA2 transfer completed: invalidate CPU data cache over bounce buffer */
 +			uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
 +			flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
++			sargo_clean_dcache((vm_offset_t)ss.bounce, SDHCI_BLOCK);
 +			__builtin_arm_dsb(0xf);
 +			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +			break;
@@ -910,6 +926,7 @@ index 0000000..eb89c23
 +		buf_setresid(bp, count - done);
 +	}
 +	if (!error) {
++		sargo_clean_dcache((vm_offset_t)vaddr, count);
 +		static uint64_t sargo_total_bytes_read = 0;
 +		sargo_total_bytes_read += count;
 +		if ((sargo_total_bytes_read >> 20) != ((sargo_total_bytes_read - count) >> 20) &&

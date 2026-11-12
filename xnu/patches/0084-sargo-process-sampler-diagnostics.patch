@@ -53,3 +53,38 @@
 +		(void)tsleep(&chan, PZERO, "sweetsmp", 30 * hz);
  	}
  }
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -857,6 +857,15 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
+ 	printf("CRASH %s pc 0x%llx lr 0x%llx sp 0x%llx fp 0x%llx far 0x%llx\n", name,
+ 	    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss), fp,
+ 	    (uint64_t)saved_state64(ss)->far);
++	{
++		uint32_t instrs[4] = {0};
++		uint64_t crash_pc = get_saved_state_pc(ss);
++		user_addr_t user_pc = (user_addr_t)(crash_pc & 0x0000ffffffffffffULL);
++		if (copyin(user_pc & ~3ULL, instrs, sizeof(instrs)) == 0) {
++			printf("CRASH %s instrs @ pc [0x%08x 0x%08x 0x%08x 0x%08x]\n",
++			    name, instrs[0], instrs[1], instrs[2], instrs[3]);
++		}
++	}
+ 
+ 	char line[200];
+ 	int n = snprintf(line, sizeof(line), "CRASH %s bt", name);
+diff --git a/osfmk/vm/vm_fault.c b/osfmk/vm/vm_fault.c
+--- a/osfmk/vm/vm_fault.c
++++ b/osfmk/vm/vm_fault.c
+@@ -8312,6 +8312,12 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
+ 		CA_EVENT_SEND(ca_event);
+ 		printf("Text page corruption detected for pid %d\n", proc_selfpid());
+ 		++vmtc_total;
++		if (diagnose_buffer != NULL) {
++			const uint32_t *dw = (const uint32_t *)diagnose_buffer;
++			printf("CORRUPT PAGE pid %d va 0x%llx: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    proc_selfpid(), (uint64_t)code_addr,
++			    dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7]);
++		}
+ 		return KERN_FAILURE; /* failure means we definitely found a corrupt page */
+ 	}
+  done:
