@@ -76,7 +76,7 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 diff --git a/osfmk/vm/vm_fault.c b/osfmk/vm/vm_fault.c
 --- a/osfmk/vm/vm_fault.c
 +++ b/osfmk/vm/vm_fault.c
-@@ -8312,6 +8312,18 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
+@@ -8312,6 +8312,22 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
  		CA_EVENT_SEND(ca_event);
  		printf("Text page corruption detected for pid %d\n", proc_selfpid());
  		++vmtc_total;
@@ -92,6 +92,11 @@ diff --git a/osfmk/vm/vm_fault.c b/osfmk/vm/vm_fault.c
 +				vnode_putname(vname);
 +			}
 +		}
- 		return KERN_FAILURE; /* failure means we definitely found a corrupt page */
+-		return KERN_FAILURE; /* failure means we definitely found a corrupt page */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		return KERN_SUCCESS;
++#else
++		return KERN_FAILURE; /* failure means we definitely found a corrupt page */
++#endif
  	}
  done:

@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1125 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -89,6 +89,8 @@ index 0000000..eb89c23
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern addr64_t kvtophys(vm_offset_t va);
 +extern void sweet_sample_start(void);
++extern const char *vnode_getname(struct vnode *vp);
++extern void vnode_putname(const char *name);
 +
 +static inline void
 +sargo_clean_dcache(vm_offset_t va, vm_size_t size)
@@ -945,6 +947,32 @@ index 0000000..eb89c23
 +		if ((sargo_total_bytes_read >> 20) != ((sargo_total_bytes_read - count) >> 20) &&
 +		    ((sargo_total_bytes_read >> 20) % 5) == 0) {
 +			printf("SARGO SDHCI: %llu MB read from eMMC\n", sargo_total_bytes_read >> 20);
++		}
++		struct vnode *vp = buf_vnode(bp);
++		const char *vname = vp ? vnode_getname(vp) : NULL;
++		daddr64_t lblk = buf_lblkno(bp);
++		boolean_t is_dsc = (vname != NULL && strstr(vname, "dyld_shared_cache_arm64.01") != NULL);
++		boolean_t is_off58k = ((off <= 0x58000 && off + count > 0x58000) ||
++		                       (lblk == 0x58000) ||
++		                       ((uint64_t)lblk * 512 <= 0x58000 && (uint64_t)lblk * 512 + count > 0x58000) ||
++		                       ((uint64_t)lblk * 4096 <= 0x58000 && (uint64_t)lblk * 4096 + count > 0x58000) ||
++		                       ((uint64_t)lblk * 16384 <= 0x58000 && (uint64_t)lblk * 16384 + count > 0x58000));
++		boolean_t is_txt = (count >= 16 && memcmp(vaddr, "ry/TextInput/Tex", 16) == 0);
++		if (is_dsc || is_off58k || is_txt) {
++			uint64_t lba = off / SDHCI_BLOCK;
++			const uint8_t *b = (const uint8_t *)vaddr;
++			uint8_t dump[16] = {0};
++			memcpy(dump, b, count < 16 ? count : 16);
++			printf("SARGO SDHCI: read buf_blkno=%lld lba=%llu phys_lba=%llu count=%u vnode='%s' lblk=%lld bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x (\"%.16s\")\n",
++			    (int64_t)buf_blkno(bp), (unsigned long long)lba,
++			    (unsigned long long)(ss.first_block + lba), count,
++			    vname ? vname : "?", (int64_t)lblk,
++			    dump[0], dump[1], dump[2], dump[3], dump[4], dump[5], dump[6], dump[7],
++			    dump[8], dump[9], dump[10], dump[11], dump[12], dump[13], dump[14], dump[15],
++			    (const char *)dump);
++		}
++		if (vname && vp) {
++			vnode_putname(vname);
 +		}
 +	}
 +	lck_mtx_unlock(&sargo_sdhci_lock);
