@@ -951,7 +951,7 @@ index 0000000..eb89c23
 +		struct vnode *vp = buf_vnode(bp);
 +		const char *vname = vp ? vnode_getname(vp) : NULL;
 +		daddr64_t lblk = buf_lblkno(bp);
-+		boolean_t is_dsc = (vname != NULL && strstr(vname, "dyld_shared_cache_arm64.01") != NULL);
++		boolean_t is_dsc = (vname != NULL && strnstr(vname, "dyld_shared_cache_arm64.01", strlen(vname)) != NULL);
 +		boolean_t is_off58k = ((off <= 0x58000 && off + count > 0x58000) ||
 +		                       (lblk == 0x58000) ||
 +		                       ((uint64_t)lblk * 512 <= 0x58000 && (uint64_t)lblk * 512 + count > 0x58000) ||
