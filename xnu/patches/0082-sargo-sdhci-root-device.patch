@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1083 @@
+@@ -0,0 +1,1084 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -1098,6 +1098,7 @@ index 0000000..eb89c23
 +	ss.ready = true;
 +	printf("SARGO SDHCI: \"%s\": first block 0x%llx, %llu MiB, read-only\n",
 +	    want, ss.first_block, ss.nblocks * SDHCI_BLOCK >> 20);
++	printf("SARGO SDHCI: sargo_clean_dcache active\n");
 +	sweet_sample_start();
 +	return 0;
 +}
