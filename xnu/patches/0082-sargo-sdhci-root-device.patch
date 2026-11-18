@@ -41,7 +41,7 @@ new file mode 100644
 index 0000000..eb89c23
 --- /dev/null
 +++ b/bsd/dev/sargo_sdhci.c
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1097 @@
 +/*
 + * SARGO internal eMMC root device (read-only, PIO).
 + *
@@ -102,6 +102,20 @@ index 0000000..eb89c23
 +	}
 +	__asm__ volatile("dsb sy; isb" ::: "memory");
 +}
++
++static inline void
++sargo_inval_dcache(vm_offset_t va, vm_size_t size)
++{
++	vm_offset_t line = va & ~63ULL;
++	vm_offset_t end = (va + size + 63ULL) & ~63ULL;
++	__asm__ volatile("dmb sy" ::: "memory");
++	while (line < end) {
++		__asm__ volatile("dc ivac, %0" : : "r"(line) : "memory");
++		line += 64;
++	}
++	__asm__ volatile("dsb sy; isb" ::: "memory");
++}
++
 +
 +/* SDHCI standard register offsets (SD Host Controller spec). */
 +#define REG_DMA_ADDR        0x00
@@ -394,6 +408,7 @@ index 0000000..eb89c23
 +		uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
 +		uint64_t desc_phys = (uint64_t)kvtophys((vm_offset_t)ss_adma);
 +
++		memset(ss.bounce, 0xaa, SDHCI_BLOCK);
 +		memset(ss_adma, 0, sizeof(ss_adma));
 +		ss_adma[0].cmd = 0x0023u; /* ADMA2_TRAN_VALID (0x21) | ADMA2_END (0x02) */
 +		ss_adma[0].len = SDHCI_BLOCK;
@@ -483,9 +498,7 @@ index 0000000..eb89c23
 +
 +		if (nint & INT_XFER_COMPLETE) {
 +			/* ADMA2 transfer completed: invalidate CPU data cache over bounce buffer */
-+			uint64_t bounce_phys = (uint64_t)kvtophys((vm_offset_t)ss.bounce);
-+			flush_dcache64(bounce_phys, SDHCI_BLOCK, TRUE);
-+			sargo_clean_dcache((vm_offset_t)ss.bounce, SDHCI_BLOCK);
++			sargo_inval_dcache((vm_offset_t)ss.bounce, SDHCI_BLOCK);
 +			__builtin_arm_dsb(0xf);
 +			sdhci_wr32(REG_INT_STATUS, INT_XFER_COMPLETE);
 +			break;

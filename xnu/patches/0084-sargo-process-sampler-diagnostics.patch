@@ -76,15 +76,21 @@ diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
 diff --git a/osfmk/vm/vm_fault.c b/osfmk/vm/vm_fault.c
 --- a/osfmk/vm/vm_fault.c
 +++ b/osfmk/vm/vm_fault.c
-@@ -8312,6 +8312,12 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
+@@ -8312,6 +8312,18 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
  		CA_EVENT_SEND(ca_event);
  		printf("Text page corruption detected for pid %d\n", proc_selfpid());
  		++vmtc_total;
 +		if (diagnose_buffer != NULL) {
 +			const uint32_t *dw = (const uint32_t *)diagnose_buffer;
-+			printf("CORRUPT PAGE pid %d va 0x%llx (diagnose_buffer): %08x %08x %08x %08x %08x %08x %08x %08x\n",
-+			    proc_selfpid(), (uint64_t)code_addr,
++			extern const char *vnode_getname(struct vnode *vp);
++			extern void vnode_putname(const char *name);
++			const char *vname = vnode ? vnode_getname(vnode) : "?";
++			printf("CORRUPT PAGE pid %d va 0x%llx (diagnose_buffer) '%s' off 0x%llx: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    proc_selfpid(), (uint64_t)code_addr, vname ? vname : "?", (uint64_t)offset,
 +			    dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7]);
++			if (vname && vnode) {
++				vnode_putname(vname);
++			}
 +		}
  		return KERN_FAILURE; /* failure means we definitely found a corrupt page */
  	}
