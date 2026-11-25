@@ -42,7 +42,7 @@ workflows:
 
           # Fix Xcode 16 mig passing -mach_msg2 and malformed sanitizer ignorelist to clang
           sed -i '' 's/-mno-implicit-sme)/-mno-implicit-sme|-mach_msg2|-fsanitize-ignorelist=\*|-fsanitize-coverage-ignorelist=\*)/g' "$WORK_DIR/hakios-xnu-kernel/kernel/host/xnu-clang"
-          sed -i '' 's/CC=xnu-clang/MIGKSFLAGS= CC=xnu-clang/g' "$WORK_DIR/hakios-xnu-kernel/kernel/build.sh"
+          sed -i '' 's/CC=xnu-clang/MIGKSFLAGS="-DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1" CC=xnu-clang/g' "$WORK_DIR/hakios-xnu-kernel/kernel/build.sh"
 
           # Bypass Apple internal vm_sanitize_enforcement check
           mkdir -p "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools"
