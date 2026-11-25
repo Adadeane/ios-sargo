@@ -48,6 +48,9 @@ workflows:
           mkdir -p "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools"
           printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools/vm_sanitize_enforcement.py"
           chmod +x "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools/vm_sanitize_enforcement.py"
+
+          # Provide clzg/ctzg fallbacks for Apple Clang 16 in xnu_clang_compat.h
+          printf '\n#if !__has_builtin(__builtin_clzg)\n#define __builtin_clzg(x, fallback) ((x) ? (int)__builtin_clzll((unsigned long long)(x)) : (fallback))\n#endif\n#if !__has_builtin(__builtin_ctzg)\n#define __builtin_ctzg(x, fallback) ((x) ? (int)__builtin_ctzll((unsigned long long)(x)) : (fallback))\n#endif\n' >> "$WORK_DIR/hakios-xnu-kernel/kernel/deps/hostinc/xnu_clang_compat.h"
       - name: Build HakiOS XNU kernel and EFI loader
         script: |
           set -euo pipefail
