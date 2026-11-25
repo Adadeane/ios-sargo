@@ -1,0 +1,55 @@
+/dts-v1/;
+
+// Google Pixel 3a (sargo) board description for HakiOS.
+// Hardware values verified from the device's live FDT (/sys/firmware/fdt) and
+// mainline Linux sdm670-google-sargo.dts.
+/ {
+	name = "sargo";
+	description = "Google Pixel 3a";
+	soc = "sdm670";
+
+	// Start empty for initial bring-up (Documentation/porting.md, step 4).
+	// Ready once verified on hardware: display-scan, buttons-pmic, cpufreq-epss, ddr-rpmh.
+	features = <>;
+
+	// Loader framebuffer address (cont_splash_region@9c000000: 1080x2220 ARGB8888, stride 4320).
+	loader {
+		fb-base = <0x9c000000>;
+	};
+
+	// Samsung S6E3FA7 command-mode AMOLED panel (qcom,mdss_dsi_s6e3fa7_sdc_1080p_cmd).
+	backlight {
+		type = "dcs";
+		panel-mode = "command";
+		min = <3>;
+		max = <1023>;
+		bytes = <2>;
+		byte-order = "lsb-first";
+	};
+
+	// Thermal frequency floors for the two CPU clusters (Silver 6x, Gold 2x).
+	thermal {
+		floor-mhz = <1000 1200>;
+	};
+
+	// Primary power/volume-down on PM660 (SPMI slave 0, pon@800); volume-up on PM660L GPIO 7 (slave 2, 0xc6).
+	buttons {
+		pon = <0x008>;
+		pon-name = "PM660 PON (kpdpwr/resin)";
+		volume-up = <0x2c6>;
+		volume-up-name = "PM660L GPIO7";
+	};
+
+	// PM660 RTC_RW (SPMI slave 0, rtc_rw@6000).
+	rtc {
+		peripheral = <0x060>;
+		name = "PM660 RTC";
+	};
+
+	// Default bring-up boot arguments (1 core first, then cpus=8 after PSCI SMP check).
+	boot {
+		fastboot-product = "sargo";
+		cpus = <1>;
+		bootargs = "debug=0xc", "serial=3", "keepsyms=1", "-enable_kprintf_spam";
+	};
+};

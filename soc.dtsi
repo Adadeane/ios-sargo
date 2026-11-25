@@ -1,0 +1,78 @@
+/dts-v1/;
+
+// Qualcomm Snapdragon 670 (SDM670) SoC description for HakiOS.
+// Verified against Pixel 3a (sargo) live FDT (/sys/firmware/fdt) and mainline Linux
+// sdm670.dtsi / gcc-sdm845.c / dispcc-sdm845.c / dpu_4_0_sdm845.h.
+/ {
+	name = "sdm670";
+	description = "Qualcomm Snapdragon 670 (SDM670)";
+
+	// Display and bus clocks (Linux gcc-sdm845.c, dispcc-sdm845.c).
+	clocks {
+		gcc = <0x00100000>;
+		gcc-disp-ahb-cbcr = <0xb00c>;      // gcc_disp_ahb_clk.halt_reg
+		dispcc = <0x0af00000>;
+		dispcc-mdss-gdscr = <0x3000>;      // mdss_gdsc.gdscr
+		dispcc-mdss-ahb-cbcr = <0x4004>;   // disp_cc_mdss_ahb_clk.halt_reg
+		dispcc-mdss-pclk0-cbcr = <0x2004>; // disp_cc_mdss_pclk0_clk.halt_reg
+		dispcc-mdss-mdp-cbcr = <0x200c>;   // disp_cc_mdss_mdp_clk.halt_reg
+	};
+
+	// MDSS DSI0 controller and INTF_1 (mdss_mdp 0xae01000 + INTF_1 0x6a800).
+	display {
+		dsi0 = <0x0ae94000>;
+		intf1 = <0x0ae6b800>;
+	};
+
+	// TLMM WEST tile (pinctrl@03400000 + 0x100000). Note: SDM670 splits GPIOs across
+	// three tiles (WEST +0x100000, NORTH +0x500000, SOUTH +0x900000); board/tlmm.h
+	// assumes a single contiguous tile, so GPIO-based drivers need multi-tile support.
+	pins {
+		tlmm = <0x03500000>;
+	};
+
+	// SPMI PMIC arbiter (qcom,spmi@c440000).
+	spmi {
+		core = <0x0c440000>;
+		cnfg = <0x0c40a000>;
+		observer = <0x0e600000>;
+		ee = <0>;
+		channels = <0x0c600000>;
+	};
+
+	// RPMh command database (mainline sdm670.dtsi: aop-cmd-db-mem) and APPS RSC drv-2.
+	rpmh {
+		cmd-db = <0x85fe0000>;
+		cmd-db-size = <0x00020000>;
+		rsc = <0x179e0000>;
+		tcs-offset = <0xd00>;
+	};
+
+	// TSENS v2 thermal controllers.
+	thermal {
+		tsens = <0x0c263000 0x0c265000>;
+	};
+
+	// CPU frequency hardware: SDM670 uses OSM ("qcom,sdm670-cpufreq-hw"):
+	// domain 0 = 6x Kryo 360 Silver (0x17d43000), domain 1 = 2x Kryo 360 Gold (0x17d45800).
+	cpufreq {
+		block = "osm";
+		epss = <0x17d43000>;
+		epss-domain-size = <0x1400>;
+		domains = <0x17d43000 0x17d45800>;
+		domain-cores = <6 2>;
+	};
+
+	// Machine layout for arch/arm64/boot/ loader. Note: sargo uses eMMC (sdhci@7c4000),
+	// not UFS (ufshc@1d84000 is disabled in live FDT), so platform.ufs is omitted.
+	platform {
+		io-base = <0x00400000>;
+		io-size = <0x3fc00000>;
+		gic-dist = <0x17a00000>;
+		gic-redist = <0x17a60000>;
+		cores = <8>;
+		core-shift = <8>;
+		small-cores = <0x3f>;              // cores 0..5 (Kryo 360 Silver, capacity 610)
+		psci = "smc";
+	};
+};
