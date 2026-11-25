@@ -39,6 +39,23 @@ workflows:
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/device.py" add --from "$REPO_DIR"
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" check
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" status sargo
+
+          # Fix Xcode 16 mig passing -mach_msg2 to clang preprocessor
+          "$PYTHON3" -c '
+path = "'"$WORK_DIR"'/hakios-xnu-kernel/kernel/host/xnu-clang"
+with open(path, "r") as f:
+    c = f.read()
+c = c.replace("-mno-implicit-sme)", "-mno-implicit-sme|-mach_msg2)")
+with open(path, "w") as f:
+    f.write(c)
+
+bpath = "'"$WORK_DIR"'/hakios-xnu-kernel/kernel/build.sh"
+with open(bpath, "r") as f:
+    b = f.read()
+b = b.replace("CC=xnu-clang", "MIGKSFLAGS= CC=xnu-clang")
+with open(bpath, "w") as f:
+    f.write(b)
+'
       - name: Build HakiOS XNU kernel and EFI loader
         script: |
           set -euo pipefail
