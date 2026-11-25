@@ -37,3 +37,8 @@ Verified against the live Pixel 3a FDT (`/sys/firmware/fdt`) and mainline `sdm67
 3. Build U-Boot for `google/sargo` using [`uefi-profiles/google/sargo/`](uefi-profiles/google/sargo/) and pack with [`tools/pack_sargo_boot.py`](tools/pack_sargo_boot.py), then `fastboot boot` to verify `platform sargo` and the framebuffer console.
 4. Enable and verify `display-scan`, `buttons-pmic`, `cpufreq-epss`, `ddr-rpmh`, and `thermal` one at a time via boot-args.
 5. Implement SDM670 multi-tile TLMM support + a `touch-synaptics-rmi4` driver (I2C9 `0xa84000`, addr `0x20`) to enable touch input.
+
+## Reference Notes from the `sargo` Branch
+
+- [notes/sargo-bringup-findings.md](notes/sargo-bringup-findings.md) — Google ABL `boot.img` v2 requirements, Pixel 3a memory map / XPU carveouts, and SDCC v5 eMMC init sequence verified across 43 builds.
+- [notes/sargo_sdhci_ref.c](notes/sargo_sdhci_ref.c) — Reference SDCC v5 eMMC driver (`0x7c4000` + CQHCI `0x7c5000`, 64-bit ADMA2, ICE bypass) extracted from `sargo` patch `0082` for future native HakiOS eMMC support.

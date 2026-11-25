@@ -78,7 +78,7 @@ def boot_image_v2(kernel: bytes, ramdisk: bytes, dtb: bytes) -> bytes:
 
     header_size = 1660
     header = struct.pack(
-        "<8s10I16s512s32s1024sIQIQ",
+        "<8s10I16s512s32s1024sIQIIQ",
         b"ANDROID!",
         len(kernel), BASE + KERNEL_OFFSET,
         len(ramdisk), BASE + RAMDISK_OFFSET,
@@ -111,15 +111,24 @@ def main():
     p.add_argument("--env", type=Path)
     p.add_argument("--payload", type=Path)
     p.add_argument("--no-lz4", action="store_true", help="Keep raw U-Boot binary (only if ABL accepts it)")
+    p.add_argument(
+        "--no-patch-text-offset",
+        action="store_true",
+        help="Do not rewrite zero text_offset in the ARM64 Image header to 0x80000",
+    )
     p.add_argument("-o", "--output", type=Path, default=Path("build/hakios-sargo-boot.img"))
     a = p.parse_args()
 
-    ub = a.u_boot.read_bytes()
+    ub = bytearray(a.u_boot.read_bytes())
     if len(ub) < 64 or ub[0x38:0x3C] != b"ARM\x64":
         p.error(f"{a.u_boot} is not an AArch64 Linux image (missing ARMd header)")
     text_offset = struct.unpack_from("<Q", ub, 8)[0]
     if text_offset == 0:
-        print("warning: U-Boot image text_offset is 0; Pixel 3a ABL may require non-zero text_offset (e.g. 0x80000)")
+        if a.no_patch_text_offset:
+            print("warning: U-Boot image text_offset is 0; Pixel 3a ABL may reject it")
+        else:
+            struct.pack_into("<Q", ub, 8, 0x80000)
+            print("patched ARM64 Image text_offset 0 -> 0x80000 for Pixel 3a ABL")
 
     loader = a.loader.read_bytes()
     if not loader.startswith(b"MZ"):
@@ -138,7 +147,8 @@ def main():
 
     ramdisk = hkub(entries)
     dtb = a.dtb.read_bytes()
-    kernel = ub if a.no_lz4 else compress_lz4(ub)
+    ub_bytes = bytes(ub)
+    kernel = ub_bytes if a.no_lz4 else compress_lz4(ub_bytes)
     img = boot_image_v2(kernel, ramdisk, dtb)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(img)
