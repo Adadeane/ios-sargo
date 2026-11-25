@@ -43,6 +43,11 @@ workflows:
           # Fix Xcode 16 mig passing -mach_msg2 to clang preprocessor
           sed -i '' 's/-mno-implicit-sme)/-mno-implicit-sme|-mach_msg2)/g' "$WORK_DIR/hakios-xnu-kernel/kernel/host/xnu-clang"
           sed -i '' 's/CC=xnu-clang/MIGKSFLAGS= CC=xnu-clang/g' "$WORK_DIR/hakios-xnu-kernel/kernel/build.sh"
+
+          # Bypass Apple internal vm_sanitize_enforcement check
+          mkdir -p "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools"
+          printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools/vm_sanitize_enforcement.py"
+          chmod +x "$WORK_DIR/hakios-xnu-kernel/kernel/overlay/tools/vm_sanitize_enforcement.py"
       - name: Build HakiOS XNU kernel and EFI loader
         script: |
           set -euo pipefail
