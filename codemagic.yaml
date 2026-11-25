@@ -40,8 +40,8 @@ workflows:
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" check
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" status sargo
 
-          # Fix Xcode 16 mig passing -mach_msg2 to clang preprocessor
-          sed -i '' 's/-mno-implicit-sme)/-mno-implicit-sme|-mach_msg2)/g' "$WORK_DIR/hakios-xnu-kernel/kernel/host/xnu-clang"
+          # Fix Xcode 16 mig passing -mach_msg2 and malformed sanitizer ignorelist to clang
+          sed -i '' 's/-mno-implicit-sme)/-mno-implicit-sme|-mach_msg2|-fsanitize-ignorelist=\*|-fsanitize-coverage-ignorelist=\*)/g' "$WORK_DIR/hakios-xnu-kernel/kernel/host/xnu-clang"
           sed -i '' 's/CC=xnu-clang/MIGKSFLAGS= CC=xnu-clang/g' "$WORK_DIR/hakios-xnu-kernel/kernel/build.sh"
 
           # Bypass Apple internal vm_sanitize_enforcement check
