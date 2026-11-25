@@ -23,7 +23,7 @@ workflows:
       - name: Install build dependencies
         script: |
           set -euo pipefail
-          brew install gawk llvm python@3.12 xz make bash openssl@3 dtc lz4 aarch64-elf-gcc pkgconf gnutls autoconf automake
+          brew install gawk llvm lld python@3.12 xz make bash openssl@3 dtc lz4 aarch64-elf-gcc pkgconf gnutls autoconf automake
           xcode-select -p
           test -d "$(xcode-select -p)"
           xcrun --sdk iphoneos --show-sdk-path
@@ -62,6 +62,7 @@ workflows:
           export PYTHON3="$(brew --prefix python@3.12)/bin/python3.12"
           export PATH="$(brew --prefix python@3.12)/bin:$(brew --prefix gawk)/libexec/gnubin:$PATH"
           export LLVM_PREFIX="$(brew --prefix llvm)"
+          export LLD_PREFIX="$(brew --prefix lld)"
 
           cd "$KDIR"
           ./kernel/build.sh || {
@@ -69,9 +70,9 @@ workflows:
             exit 1
           }
 
-          LOADER_CC="$LLVM_PREFIX/bin/clang" LOADER_LINK="$LLVM_PREFIX/bin/lld-link" ./arch/arm64/boot/build.sh
+          LOADER_CC="$LLVM_PREFIX/bin/clang" LOADER_LINK="$LLD_PREFIX/bin/lld-link" ./arch/arm64/boot/build.sh
 
-          KBIN=$(ls ../xnu-*-hakios/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837)
+          KBIN=$(ls ../xnu-*-hakios/BUILD/obj/mach.development.bcm2837 2>/dev/null || ls ../xnu-*-hakios/BUILD/obj/*/mach.development.bcm2837 | head -n 1)
           cp -f "$KBIN" "$OUT_DIR/mach.development.bcm2837"
           cp -f arch/arm64/boot/loader.efi "$OUT_DIR/loader.efi"
 
