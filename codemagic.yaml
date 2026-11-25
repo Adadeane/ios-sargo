@@ -23,7 +23,7 @@ workflows:
       - name: Install build dependencies
         script: |
           set -euo pipefail
-          brew install gawk llvm python@3.12 xz make bash openssl@3 dtc lz4 aarch64-elf-gcc pkgconf gnutls
+          brew install gawk llvm python@3.12 xz make bash openssl@3 dtc lz4 aarch64-elf-gcc pkgconf gnutls autoconf automake
           xcode-select -p
           test -d "$(xcode-select -p)"
           xcrun --sdk iphoneos --show-sdk-path
