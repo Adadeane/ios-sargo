@@ -1,0 +1,133 @@
+# Codemagic CI builder for HakiOS on Google Pixel 3a (sargo, SDM670).
+# Builds the HakiOS XNU kernel, EFI loader, sargo XNUP payload, and Pixel 3a U-Boot boot.img.
+workflows:
+  hakios-sargo:
+    name: HakiOS sargo (Pixel 3a)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: 16.2
+      vars:
+        HAKIOS_KERNEL_REPO: https://github.com/oosexgang/hakios-xnu-kernel.git
+        HAKIOS_KERNEL_BRANCH: common
+        HAKIOS_UEFI_REPO: https://github.com/oosexgang/hakios-uefi.git
+        HAKIOS_UEFI_BRANCH: main
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: hakios
+          include: true
+          source: true
+    scripts:
+      - name: Install build dependencies
+        script: |
+          set -euo pipefail
+          brew install gawk llvm python@3.12 xz make bash openssl@3 dtc lz4 aarch64-elf-gcc pkgconf gnutls
+          xcode-select -p
+          test -d "$(xcode-select -p)"
+          xcrun --sdk iphoneos --show-sdk-path
+      - name: Fetch HakiOS kernel and UEFI repositories
+        script: |
+          set -euo pipefail
+          REPO_DIR="$CM_BUILD_DIR"
+          WORK_DIR="$(dirname "$CM_BUILD_DIR")/hakios-work"
+          mkdir -p "$WORK_DIR"
+          git clone --depth 1 --branch "$HAKIOS_KERNEL_BRANCH" "$HAKIOS_KERNEL_REPO" "$WORK_DIR/hakios-xnu-kernel"
+          git clone --depth 1 --branch "$HAKIOS_UEFI_BRANCH" "$HAKIOS_UEFI_REPO" "$WORK_DIR/hakios-uefi"
+          PYTHON3="$(brew --prefix python@3.12)/bin/python3.12"
+          "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/device.py" add --from "$REPO_DIR"
+          "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" check
+          "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" status sargo
+      - name: Build HakiOS XNU kernel and EFI loader
+        script: |
+          set -euo pipefail
+          WORK_DIR="$(dirname "$CM_BUILD_DIR")/hakios-work"
+          KDIR="$WORK_DIR/hakios-xnu-kernel"
+          OUT_DIR="$CM_BUILD_DIR/out"
+          mkdir -p "$OUT_DIR/logs"
+
+          export PYTHON3="$(brew --prefix python@3.12)/bin/python3.12"
+          export PATH="$(brew --prefix python@3.12)/bin:$(brew --prefix gawk)/libexec/gnubin:$PATH"
+          export LLVM_PREFIX="$(brew --prefix llvm)"
+
+          cd "$KDIR"
+          ./kernel/build.sh || {
+            cp -f ../xnu-*-hakios-deps/*.log "$OUT_DIR/logs/" 2>/dev/null || true
+            exit 1
+          }
+
+          LOADER_CC="$LLVM_PREFIX/bin/clang" LOADER_LINK="$LLVM_PREFIX/bin/lld-link" ./arch/arm64/boot/build.sh
+
+          KBIN=$(ls ../xnu-*-hakios/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837)
+          cp -f "$KBIN" "$OUT_DIR/mach.development.bcm2837"
+          cp -f arch/arm64/boot/loader.efi "$OUT_DIR/loader.efi"
+
+          "$PYTHON3" tools/image.py build --board sargo --kernel "$OUT_DIR/mach.development.bcm2837" \
+            --loader "$OUT_DIR/loader.efi" --out "$OUT_DIR/image"
+          cp -f "$OUT_DIR/image/sargo.payload" "$OUT_DIR/sargo.payload"
+          cp -f "$OUT_DIR/image/manifest.json" "$OUT_DIR/manifest.json"
+      - name: Build U-Boot and pack Pixel 3a boot.img
+        script: |
+          set -euo pipefail
+          WORK_DIR="$(dirname "$CM_BUILD_DIR")/hakios-work"
+          UDIR="$WORK_DIR/hakios-uefi"
+          OUT_DIR="$CM_BUILD_DIR/out"
+          PYTHON3="$(brew --prefix python@3.12)/bin/python3.12"
+          GMAKE="$(command -v gmake)"
+          GBASH="$(brew --prefix bash)/bin/bash"
+          OPENSSL="$(brew --prefix openssl@3)"
+
+          mkdir -p "$UDIR/build/u-boot-host-tools"
+          cat > "$UDIR/build/u-boot-host-tools/make" <<EOF
+          #!/bin/sh
+          exec "$GMAKE" "\$@"
+          EOF
+          cat > "$UDIR/build/u-boot-host-tools/bash" <<EOF
+          #!/bin/sh
+          exec "$GBASH" "\$@"
+          EOF
+          cat > "$UDIR/build/u-boot-host-tools/nproc" <<EOF
+          #!/bin/sh
+          sysctl -n hw.ncpu
+          EOF
+          ln -sf "$PYTHON3" "$UDIR/build/u-boot-host-tools/python3"
+          chmod +x "$UDIR/build/u-boot-host-tools/make" "$UDIR/build/u-boot-host-tools/bash" "$UDIR/build/u-boot-host-tools/nproc"
+
+          export PATH="$UDIR/build/u-boot-host-tools:$PATH"
+          export HOSTCFLAGS="-I$OPENSSL/include"
+          export HOSTLDFLAGS="-L$OPENSSL/lib"
+          export PKG_CONFIG_PATH="$OPENSSL/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export HAKIOS_PROFILE_ROOT="$CM_BUILD_DIR/uefi-profiles"
+
+          cd "$UDIR"
+          ./u-boot/apply.sh google/sargo
+
+          UB_SRC="$UDIR/build/u-boot-sargo-src"
+          UB_OUT="$UDIR/build/u-boot-sargo"
+          "$GMAKE" -C "$UB_SRC" -s O="$UB_OUT" CROSS_COMPILE=aarch64-elf- \
+            qcom_defconfig qcom-phone.config hakios_sargo.config
+          "$GMAKE" -C "$UB_SRC" -s O="$UB_OUT" CROSS_COMPILE=aarch64-elf- -j"$(sysctl -n hw.ncpu)"
+
+          cp -f "$UB_OUT/u-boot.bin" "$OUT_DIR/u-boot.bin"
+          cp -f "$UB_OUT/dts/upstream/src/arm64/qcom/sdm670-google-sargo.dtb" "$OUT_DIR/sdm670-google-sargo.dtb"
+
+          "$PYTHON3" "$CM_BUILD_DIR/tools/pack_sargo_boot.py" \
+            --u-boot "$OUT_DIR/u-boot.bin" \
+            --loader "$OUT_DIR/loader.efi" \
+            --dtb "$OUT_DIR/sdm670-google-sargo.dtb" \
+            --payload "$OUT_DIR/sargo.payload" \
+            -o "$OUT_DIR/hakios-sargo-boot.img"
+
+          (cd "$OUT_DIR" && shasum -a 256 mach.development.bcm2837 loader.efi sargo.payload u-boot.bin sdm670-google-sargo.dtb hakios-sargo-boot.img > SHA256SUMS)
+          ls -lh "$OUT_DIR"
+    artifacts:
+      - out/mach.development.bcm2837
+      - out/loader.efi
+      - out/sargo.payload
+      - out/manifest.json
+      - out/u-boot.bin
+      - out/sdm670-google-sargo.dtb
+      - out/hakios-sargo-boot.img
+      - out/SHA256SUMS
+      - out/logs/*

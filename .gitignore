@@ -1,6 +1,7 @@
 # What a phone's repository never holds (BUILDING.md, "What is not here")
 /*.pyc
 __pycache__/
+out/
 firmware/
 *.ipsw
 *.im4p
