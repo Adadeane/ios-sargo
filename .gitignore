@@ -11,6 +11,7 @@ identity.bin
 *.dmg
 # a device tree as Android has it, and its source: the vendor's (phone.dts is what Documentation/porting.md calls it)
 *.dtb
+!dtb/sargo-stock.dtb
 *.dtbo
 /phone.dts
 /dts-android/

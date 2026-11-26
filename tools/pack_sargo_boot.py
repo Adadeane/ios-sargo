@@ -18,7 +18,7 @@ PAGE = 4096
 BASE = 0x00000000
 KERNEL_OFFSET = 0x00008000
 RAMDISK_OFFSET = 0x01000000
-SECOND_OFFSET = 0x00F00000
+SECOND_OFFSET = 0x00000000
 TAGS_OFFSET = 0x00000100
 DTB_OFFSET = 0x01F00000
 
@@ -50,10 +50,10 @@ def hkub(entries):
 
 
 def compress_lz4(data: bytes) -> bytes:
-    """Compress kernel image as an LZ4 legacy/frame blob accepted by Pixel 3a ABL."""
+    """Compress kernel image as an LZ4 legacy/frame blob accepted by Pixel 3a ABL (256 KB block size)."""
     lz4_bin = shutil.which("lz4")
     if lz4_bin:
-        proc = subprocess.run([lz4_bin, "-f", "-q", "-9", "-", "-"], input=data, capture_output=True, check=True)
+        proc = subprocess.run([lz4_bin, "-f", "-q", "-9", "-B5", "-", "-"], input=data, capture_output=True, check=True)
         return proc.stdout
     try:
         import lz4.frame  # type: ignore
@@ -107,14 +107,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--u-boot", type=Path, required=True)
     p.add_argument("--loader", type=Path, required=True)
-    p.add_argument("--dtb", type=Path, required=True)
+    p.add_argument("--dtb", type=Path, required=True, help="HakiOS U-Boot device tree")
+    p.add_argument("--abl-dtb", type=Path, help="Reference stock DTB for ABL hardware validation (defaults to dtb/sargo-stock.dtb)")
     p.add_argument("--env", type=Path)
     p.add_argument("--payload", type=Path)
     p.add_argument("--no-lz4", action="store_true", help="Keep raw U-Boot binary (only if ABL accepts it)")
     p.add_argument(
         "--no-patch-text-offset",
         action="store_true",
-        help="Do not rewrite zero text_offset in the ARM64 Image header to 0x80000",
+        help="Do not rewrite text_offset in the ARM64 Image header to 0x80000",
     )
     p.add_argument("-o", "--output", type=Path, default=Path("build/hakios-sargo-boot.img"))
     a = p.parse_args()
@@ -123,18 +124,26 @@ def main():
     if len(ub) < 64 or ub[0x38:0x3C] != b"ARM\x64":
         p.error(f"{a.u_boot} is not an AArch64 Linux image (missing ARMd header)")
     text_offset = struct.unpack_from("<Q", ub, 8)[0]
-    if text_offset == 0:
+    if text_offset != 0x80000:
         if a.no_patch_text_offset:
-            print("warning: U-Boot image text_offset is 0; Pixel 3a ABL may reject it")
+            print(f"warning: U-Boot image text_offset is {hex(text_offset)}; Pixel 3a ABL may reject it")
         else:
             struct.pack_into("<Q", ub, 8, 0x80000)
-            print("patched ARM64 Image text_offset 0 -> 0x80000 for Pixel 3a ABL")
+            print(f"patched ARM64 Image text_offset {hex(text_offset)} -> 0x80000 for Pixel 3a ABL")
+
+    image_size = struct.unpack_from("<Q", ub, 16)[0]
+    if image_size < len(ub):
+        struct.pack_into("<Q", ub, 16, len(ub))
+        image_size = len(ub)
+    if len(ub) < image_size:
+        ub.extend(b"\0" * (image_size - len(ub)))
 
     loader = a.loader.read_bytes()
     if not loader.startswith(b"MZ"):
         p.error(f"{a.loader} is not a UEFI application")
 
-    entries = [("loader", loader)]
+    dtb_bytes = a.dtb.read_bytes()
+    entries = [("loader", loader), ("dtb", dtb_bytes)]
     if a.payload:
         payload = a.payload.read_bytes()
         if len(payload) < 8 or payload[:4] != PAYLOAD_MAGIC:
@@ -146,13 +155,23 @@ def main():
         entries.append(("env", a.env.read_bytes()))
 
     ramdisk = hkub(entries)
-    dtb = a.dtb.read_bytes()
+
+    abl_dtb_path = a.abl_dtb
+    if not abl_dtb_path:
+        default_stock = Path(__file__).resolve().parent.parent / "dtb" / "sargo-stock.dtb"
+        if default_stock.is_file():
+            abl_dtb_path = default_stock
+    
+    abl_dtb_bytes = abl_dtb_path.read_bytes() if abl_dtb_path else dtb_bytes
+    if abl_dtb_path:
+        print(f"Using ABL hardware validation DTB from {abl_dtb_path} ({len(abl_dtb_bytes)} bytes)")
+
     ub_bytes = bytes(ub)
     kernel = ub_bytes if a.no_lz4 else compress_lz4(ub_bytes)
-    img = boot_image_v2(kernel, ramdisk, dtb)
+    img = boot_image_v2(kernel, ramdisk, abl_dtb_bytes)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_bytes(img)
-    print(f"{a.output}: {len(img)} bytes (kernel={len(kernel)}, ramdisk={len(ramdisk)}, dtb={len(dtb)})")
+    print(f"{a.output}: {len(img)} bytes (kernel={len(kernel)}, ramdisk={len(ramdisk)}, dtb={len(abl_dtb_bytes)})")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,6 @@
 	boot {
 		fastboot-product = "sargo";
 		cpus = <1>;
-		bootargs = "debug=0xc", "serial=3", "keepsyms=1", "-enable_kprintf_spam";
+		bootargs = "debug=0xc", "serial=3", "cpus=1", "keepsyms=1", "-enable_kprintf_spam", "rd=sdhciroot0", "unentitled_ios_sim_launch=1", "ignition_level=1", "wdt_test=no_user_checkin", "rootrw=0", "launchd_unsecure_cache=1";
 	};
 };
