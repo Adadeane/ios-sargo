@@ -87,13 +87,22 @@ def main():
     patch_file(iokit_cpp, wait_target, wait_repl, "fast bsdWait")
 
     # 4. Cryptex VFS Redirection in bsd/vfs/vfs_lookup.c
+    # HakiOS 0007-vfs.patch wraps namei() in a tracing shim and renames the
+    # real body to namei_untraced(). After that patch the "retry_copy:" label is
+    # inside namei_untraced, so we need to match the context that follows it
+    # (the blank line + "/*" that opens the "Since the name cache..." comment).
     lookup_c = os.path.join(xnu_dir, "bsd", "vfs", "vfs_lookup.c")
+
+    # Primary target: match the two-line block just below the bytes_copied reset,
+    # which is unique inside namei_untraced and present in both upstream and
+    # HakiOS-patched trees.
     vfs_target = """\
-retry_copy:
 \tndp->ni_pathlen = (u_int)bytes_copied;
-\tbytes_copied = 0;"""
+\tbytes_copied = 0;
+
+\t/*
+\t * Since the name cache may contain positive entries of"""
     vfs_repl = """\
-retry_copy:
 \tndp->ni_pathlen = (u_int)bytes_copied;
 \tbytes_copied = 0;
 
@@ -153,10 +162,19 @@ retry_copy:
 \t\t\t\t}
 \t\t\t}
 \t\t}
-\t}"""
-    patch_file(lookup_c, vfs_target, vfs_repl, "Cryptex VFS Redirection")
+\t}
+
+\t/*
+\t * Since the name cache may contain positive entries of"""
+    if not patch_file(lookup_c, vfs_target, vfs_repl, "Cryptex VFS Redirection"):
+        # Fallback: try without the trailing comment anchor (older XNU)
+        vfs_target2 = "\tndp->ni_pathlen = (u_int)bytes_copied;\n\tbytes_copied = 0;\n"
+        vfs_repl2 = vfs_repl + "\n"
+        patch_file(lookup_c, vfs_target2, vfs_repl2, "Cryptex VFS Redirection (fallback)")
 
     # 5. Text page revalidation in osfmk/vm/vm_fault.c
+    # Unconditionally return KERN_SUCCESS so dyld shared cache pages are never
+    # considered corrupt regardless of board config (no #ifdef guards here).
     fault_c = os.path.join(xnu_dir, "osfmk", "vm", "vm_fault.c")
     fault_target = """\
 \t\tCA_EVENT_SEND(ca_event);
@@ -167,8 +185,73 @@ retry_copy:
 \t\tCA_EVENT_SEND(ca_event);
 \t\tprintf("Text page corruption detected for pid %d\\n", proc_selfpid());
 \t\t++vmtc_total;
+\t\t/* SARGO: always treat text page as valid; iOS 16 dyld cache pages are
+\t\t * signed with Apple's root but we cannot verify on non-Apple silicon.
+\t\t * Returning KERN_FAILURE here kills the process (tccd, identityservicesd,
+\t\t * etc.) in a crash loop via SIGBUS. */
 \t\treturn KERN_SUCCESS;"""
     patch_file(fault_c, fault_target, fault_repl, "text page revalidation bypass")
+
+    # 6. shared_region_map_and_slide: bypass root ownership + CS enforcement
+    # in bsd/vm/vm_unix.c so the dyld cache slides without trust cache checks.
+    vm_unix_c = os.path.join(xnu_dir, "bsd", "vm", "vm_unix.c")
+    # 6a. scdir_path: add sargo/cryptex paths so the directory check passes
+    scdir_target = """\
+#if XNU_TARGET_OS_OSX
+
+#if defined (__x86_64__)
+\tstatic int scdir_enforce = 1;"""
+    scdir_repl = """\
+/* SARGO: allow dyld cache from both legacy and cryptex paths */
+static int scdir_enforce = 0;
+static char *scdir_path[] = {
+\t"/System/Library/Caches/com.apple.dyld/",
+\t"/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
+\t"/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
+\tNULL
+};
+
+#if XNU_TARGET_OS_OSX
+
+#if defined (__x86_64__)
+\tstatic int scdir_enforce = 1;"""
+    patch_file(vm_unix_c, scdir_target, scdir_repl, "scdir_path sargo bypass")
+
+    # 6b. Skip root-ownership check for dyld cache
+    root_check_target = """\
+\t\t * Check if the shared cache is in the trust cache;
+\t\t * if so, we can skip the root ownership check.
+\t\t */
+#if DEVELOPMENT || DEBUG"""
+    root_check_repl = """\
+\t\t * Check if the shared cache is in the trust cache;
+\t\t * if so, we can skip the root ownership check.
+\t\t */
+\t\t/* SARGO: always skip root ownership check for dyld cache */
+\t\tgoto after_root_check;
+#if DEVELOPMENT || DEBUG"""
+    patch_file(vm_unix_c, root_check_target, root_check_repl, "shared_region root check bypass")
+
+    # 6c. Skip code-signing enforcement for dyld cache mappings
+    cs_enforce_target = """\
+\t\t/* check that the mappings are properly covered by code signatures */
+\t\tif (!cs_system_enforcement()) {"""
+    cs_enforce_repl = """\
+\t\t/* check that the mappings are properly covered by code signatures */
+\t\t/* SARGO: accept dyld cache mappings unconditionally */
+\t\tif (1) {
+\t\t\t/* sargo: code-signing enforcement bypassed for dyld cache */
+\t\t} else if (!cs_system_enforcement()) {"""
+    patch_file(vm_unix_c, cs_enforce_target, cs_enforce_repl, "shared_region CS enforcement bypass")
+
+    # 6d. CONFIG_CSR check: always skip the immutable-flag check
+    csr_target = """\
+#if CONFIG_CSR
+\t\tif (csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) {"""
+    csr_repl = """\
+#if CONFIG_CSR
+\t\tif (0 /* SARGO: always allow unrestricted FS for dyld cache */) {"""
+    patch_file(vm_unix_c, csr_target, csr_repl, "shared_region CSR bypass")
 
     print("[sargo-xnu] All assembled XNU patches successfully applied!")
 
