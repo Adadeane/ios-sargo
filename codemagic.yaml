@@ -40,9 +40,6 @@ workflows:
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" check
           "$PYTHON3" "$WORK_DIR/hakios-xnu-kernel/tools/boards.py" status sargo
 
-          # Patch HakiOS kernel with sargo SDHCI eMMC driver, root hook, and Cryptex VFS support
-          "$PYTHON3" "$CM_BUILD_DIR/tools/patch_hakios_kernel.py" "$WORK_DIR/hakios-xnu-kernel" "$CM_BUILD_DIR"
-
           # Fix Xcode 16 mig passing -mach_msg2 and malformed sanitizer ignorelist to clang
           sed -i '' 's/-mno-implicit-sme)/-mno-implicit-sme|-mach_msg2|-fsanitize-ignorelist=\*|-fsanitize-coverage-ignorelist=\*)/g' "$WORK_DIR/hakios-xnu-kernel/kernel/host/xnu-clang"
           sed -i '' 's/CC=xnu-clang/MIGKSFLAGS="-DMACH_KERNEL_PRIVATE -DKERNEL_SERVER=1" CC=xnu-clang/g' "$WORK_DIR/hakios-xnu-kernel/kernel/build.sh"
@@ -68,6 +65,12 @@ workflows:
           export LLD_PREFIX="$(brew --prefix lld)"
 
           cd "$KDIR"
+          # 1. Assemble clean upstream XNU with HakiOS patches
+          ./kernel/assemble.sh ../xnu-12377-hakios
+
+          # 2. Patch assembled XNU with sargo SDHCI eMMC driver, root hook, and Cryptex VFS support
+          "$PYTHON3" "$CM_BUILD_DIR/tools/patch_assembled_xnu.py" "$WORK_DIR/xnu-12377-hakios" "$CM_BUILD_DIR"
+
           ./kernel/build.sh || {
             cp -f ../xnu-*-hakios-deps/*.log "$OUT_DIR/logs/" 2>/dev/null || true
             exit 1
